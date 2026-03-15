@@ -38,6 +38,9 @@ from typing import Any, Dict, List, Optional
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 logging.basicConfig(level=logging.INFO, format="%(name)s | %(levelname)s | %(message)s")
 logger = logging.getLogger("moltis_bridge")
@@ -441,11 +444,15 @@ class AndrewMoltisBridge:
 # FastAPI Webhook Server
 # ============================================================
 
+limiter = Limiter(key_func=get_remote_address)
+
 app = FastAPI(
     title="Andrew Swarm — Moltis Bridge",
     version="1.0.0-rc1",
     description="Connects Andrew's analytical brain to Moltis's Rust runtime",
 )
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Global bridge instance
 _bridge: Optional[AndrewMoltisBridge] = None
@@ -507,7 +514,8 @@ async def health():
 
 
 @app.post("/analyze", response_model=AnalyzeResponse)
-async def analyze(req: AnalyzeRequest):
+@limiter.limit("10/minute")
+async def analyze(request: Request, req: AnalyzeRequest):
     """
     Main endpoint: submit an analytical query.
     
@@ -523,6 +531,7 @@ async def analyze(req: AnalyzeRequest):
 
 
 @app.post("/webhook/moltis")
+@limiter.limit("30/minute")
 async def moltis_webhook(request: Request):
     """
     Webhook endpoint for Moltis hook system.
@@ -566,7 +575,8 @@ async def moltis_webhook(request: Request):
 
 
 @app.post("/schedule")
-async def schedule_analysis(req: ScheduleRequest):
+@limiter.limit("5/minute")
+async def schedule_analysis(request: Request, req: ScheduleRequest):
     """Schedule a recurring analytical task via Moltis cron."""
     bridge = get_bridge()
     success = await bridge.moltis.add_cron_job(
@@ -648,7 +658,7 @@ services:
       - moltis-data:/home/moltis/.moltis
       - /var/run/docker.sock:/var/run/docker.sock  # For sandbox
     environment:
-      - MOLTIS_PASSWORD=${MOLTIS_PASSWORD:-andrew2026}
+      - MOLTIS_PASSWORD=${{MOLTIS_PASSWORD:?Set MOLTIS_PASSWORD in .env}}
     healthcheck:
       test: ["CMD", "moltis", "doctor"]
       interval: 30s
@@ -659,18 +669,18 @@ services:
   andrew-bridge:
     build:
       context: .
-      dockerfile: Dockerfile.andrew
+      dockerfile: Dockerfile
     container_name: andrew-bridge
     restart: unless-stopped
     ports:
-      - "8100:8100"     # Bridge API
+      - "{bridge_port}:8100"     # Bridge API
     environment:
       - MOLTIS_HOST=moltis
       - MOLTIS_PORT=13131
-      - MOLTIS_PASSWORD=${MOLTIS_PASSWORD:-andrew2026}
-      - DATABASE_URL=${DATABASE_URL:-sqlite:///data/andrew.db}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - MOLTIS_PASSWORD=${{MOLTIS_PASSWORD:?Set MOLTIS_PASSWORD in .env}}
+      - DATABASE_URL=${{DATABASE_URL:-sqlite:///data/andrew.db}}
+      - OPENAI_API_KEY=${{OPENAI_API_KEY}}
+      - ANTHROPIC_API_KEY=${{ANTHROPIC_API_KEY}}
       - ANDREW_MAX_COST=1.00
     volumes:
       - andrew-data:/data
@@ -686,7 +696,7 @@ services:
     environment:
       - POSTGRES_DB=andrew
       - POSTGRES_USER=andrew
-      - POSTGRES_PASSWORD=${PG_PASSWORD:-andrew2026}
+      - POSTGRES_PASSWORD=${{PG_PASSWORD:?Set PG_PASSWORD in .env}}
     ports:
       - "5432:5432"
     volumes:

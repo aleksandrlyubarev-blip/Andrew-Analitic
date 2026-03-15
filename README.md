@@ -40,12 +40,12 @@ Moltis (a Rust runtime) provides the delivery layer: messaging channels (Telegra
 
 ```bash
 # 1. Clone
-git clone https://github.com/YOUR_ORG/andrew-swarm.git
-cd andrew-swarm
+git clone https://github.com/aleksandrlyubarev-blip/Andrew-Analitic.git
+cd Andrew-Analitic
 
 # 2. Configure
-cp config/.env.example .env
-# Edit .env — add at least one LLM API key
+cp .env.example .env
+# Edit .env — set MOLTIS_PASSWORD and at least one LLM API key
 
 # 3. Launch
 docker compose up -d
@@ -123,7 +123,9 @@ This is an MVP. The following guardrails are implemented but not formally audite
 - **Budget guard:** Hard cap at $1.00 per query (configurable). Stops LLM calls when exhausted.
 - **Semantic guardrails:** Checks that SQL output matches user intent (revenue question must reference revenue column, monthly question must have GROUP BY).
 
-**Not yet implemented:** formal threat model testing, adversarial fuzz suite, HITL escalation for low-confidence results, rate limiting on the bridge API.
+**Also implemented:** HITL gate for low-confidence results (confidence < 0.5 triggers human review via configurable webhook — set `HITL_ENABLED=true`). Rate limiting on all bridge endpoints (10 req/min on `/analyze`, 30 on `/webhook/moltis`, 5 on `/schedule`).
+
+**Not yet implemented:** formal threat model testing, adversarial fuzz suite.
 
 ## API Endpoints
 
@@ -137,23 +139,28 @@ This is an MVP. The following guardrails are implemented but not formally audite
 ## Project Structure
 
 ```
-andrew-swarm/
+Andrew-Analitic/
   core/
-    andrew_swarm.py       # LangGraph analytical engine (883 lines)
+    andrew_swarm.py       # LangGraph analytical engine
+    supervisor.py         # Multi-agent router (Andrew + Romeo + both)
+    romeo_swarm.py        # Romeo PhD educational agent
   bridge/
-    moltis_bridge.py      # Moltis integration layer (430 lines)
+    moltis_bridge.py      # FastAPI server, Moltis integration, rate limiting
+    hitl.py               # Human-in-the-loop gate (webhook-based review)
   config/
-    .env.example          # Environment template
-    models.yaml           # Model registry (optional)
+    .env.example          # Environment template (also at repo root)
   tests/
-    test_routing.py       # Routing smoke tests
-    test_validation.py    # SQL + Python safety tests
+    test_routing.py       # Routing smoke tests (12)
+    test_validation.py    # SQL + Python safety tests (15)
+    test_supervisor.py    # Multi-agent classification tests (13)
+    test_hitl.py          # HITL gate tests (15)
   docs/
     ARCHITECTURE.md       # Detailed architecture notes
     CHANGELOG.md          # Release history
   docker-compose.yml
   Dockerfile
   requirements.txt
+  .env.example            # Copy to .env to configure
   README.md
   LICENSE
 ```
@@ -192,12 +199,12 @@ BRIDGE_PORT=8100
 - [x] Sprint 4: Weighted 48-keyword routing, model registry, provider adapters
 - [x] Sprint 5: Moltis integration (channels, memory, sandbox, scheduling)
 - [ ] Sprint 6: Adversarial test suite (8 test cases from threat model)
-- [ ] Sprint 7: HITL escalation for low-confidence results
-- [ ] Sprint 8: Romeo PhD shared supervisor (educational + analytical agents)
+- [x] Sprint 7: HITL gate — low-confidence results routed for human review
+- [x] Sprint 8: Romeo PhD + shared supervisor (educational + analytical agents)
 
 ## Companion Agent
 
-Andrew Swarm is the analytical half of a two-agent system. **Romeo PhD** handles educational queries. A shared LangGraph supervisor (planned for Sprint 8) routes between them based on intent.
+Andrew Swarm is the analytical half of a two-agent system. **Romeo PhD** (`core/romeo_swarm.py`) handles educational queries — explanations, comparisons, derivations, and tutorials. A shared LangGraph supervisor (`core/supervisor.py`) routes every incoming query to Andrew, Romeo, or both based on keyword intent.
 
 ## License
 
