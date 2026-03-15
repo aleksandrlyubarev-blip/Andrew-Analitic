@@ -221,7 +221,7 @@ ROMEO_MAX_TOKENS=2000
 - [x] Sprint 4: Weighted 48-keyword routing, model registry, provider adapters
 - [x] Sprint 5: Moltis integration (channels, memory, sandbox, scheduling)
 - [x] Sprint 8: Romeo PhD educational agent + Vue 3 split-view web UI
-- [ ] Sprint 6: Adversarial test suite (8 test cases from threat model)
+- [x] Sprint 6: Adversarial test suite — 20 tests covering all 8 threat model cases
 - [ ] Sprint 7: HITL escalation for low-confidence results
 
 ## License
