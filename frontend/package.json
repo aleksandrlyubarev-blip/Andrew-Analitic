@@ -1,0 +1,21 @@
+{
+  "name": "andrew-romeo-ui",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --port 3001"
+  },
+  "dependencies": {
+    "chart.js": "^4.4.4",
+    "marked": "^13.0.3",
+    "pinia": "^2.2.2",
+    "vue": "^3.5.4",
+    "vue-chartjs": "^5.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.1.3",
+    "vite": "^5.4.4"
+  }
+}

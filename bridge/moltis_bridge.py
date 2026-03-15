@@ -327,6 +327,7 @@ class AndrewMoltisBridge:
             "query": query,
             "narrative": result.output if hasattr(result, 'output') else str(result.raw_data or ""),
             "sql_query": result.sql_query,
+            "query_results": getattr(result, 'query_results', []) or [],
             "confidence": result.confidence,
             "cost_usd": result.cost_usd if hasattr(result, 'cost_usd') else result.cost,
             "warnings": result.warnings if hasattr(result, 'warnings') else [],
@@ -444,6 +445,7 @@ class AnalyzeResponse(BaseModel):
     query: str
     narrative: str
     sql_query: Optional[str] = None
+    query_results: Optional[List[Dict[str, Any]]] = None
     confidence: float
     cost_usd: float
     success: bool
@@ -451,6 +453,22 @@ class AnalyzeResponse(BaseModel):
     elapsed_seconds: float
     routing: str
     formatted_message: str
+
+
+class EducateRequest(BaseModel):
+    question: str
+    user_id: Optional[str] = None
+    session_id: Optional[str] = None
+
+
+class EducateResponse(BaseModel):
+    question: str
+    answer: str
+    cost_usd: float
+    model: str
+    elapsed_seconds: float
+    success: bool
+    error: Optional[str] = None
 
 
 class ScheduleRequest(BaseModel):
@@ -536,6 +554,22 @@ async def moltis_webhook(request: Request):
         "response": result.get("formatted_message", "Analysis complete."),
         "confidence": result.get("confidence", 0),
     }
+
+
+@app.post("/educate", response_model=EducateResponse)
+async def educate(req: EducateRequest):
+    """
+    Ask Romeo PhD an educational question.
+
+    Romeo handles conceptual, theoretical, and explanatory queries about
+    data science, ML, statistics, mathematics, and programming.
+    Returns a Markdown-formatted explanation.
+    """
+    from core.romeo_phd import RomeoExecutor  # lazy import — keeps bridge fast when unused
+
+    executor = RomeoExecutor()
+    result = await asyncio.to_thread(executor.execute, req.question)
+    return EducateResponse(**result.to_dict())
 
 
 @app.post("/schedule")
