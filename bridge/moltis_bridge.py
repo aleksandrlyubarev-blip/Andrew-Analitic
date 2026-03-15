@@ -33,10 +33,13 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO, format="%(name)s | %(levelname)s | %(message)s")
@@ -420,6 +423,23 @@ app = FastAPI(
     version="1.0.0-rc1",
     description="Connects Andrew's analytical brain to Moltis's Rust runtime",
 )
+
+# Serve the compiled Vue frontend from bridge/static/ (built by `npm run build`)
+_STATIC_DIR = Path(__file__).parent / "static"
+if _STATIC_DIR.is_dir():
+    app.mount("/assets", StaticFiles(directory=_STATIC_DIR / "assets"), name="assets")
+
+    @app.get("/", include_in_schema=False)
+    async def serve_spa():
+        return FileResponse(_STATIC_DIR / "index.html")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_spa_fallback(full_path: str):
+        # Let API routes handle themselves; everything else → SPA index
+        candidate = _STATIC_DIR / full_path
+        if candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(_STATIC_DIR / "index.html")
 
 # Global bridge instance
 _bridge: Optional[AndrewMoltisBridge] = None

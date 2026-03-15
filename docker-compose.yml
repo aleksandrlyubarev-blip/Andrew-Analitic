@@ -19,6 +19,7 @@ services:
     build: { context: ., dockerfile: Dockerfile }
     container_name: andrew-bridge
     restart: unless-stopped
+    # Port 8100: API endpoints  +  Vue UI (served at /)
     ports: ["8100:8100"]
     environment:
       - MOLTIS_HOST=moltis
@@ -28,6 +29,7 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - ANDREW_MAX_COST=1.00
+      - MODEL_ROMEO=${MODEL_ROMEO:-gpt-4o-mini}
     volumes: [andrew-data:/data]
     depends_on: { moltis: { condition: service_healthy } }
   postgres:
