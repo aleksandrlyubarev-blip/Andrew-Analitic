@@ -79,6 +79,10 @@ class AndrewState(TypedDict, total=False):
     cost_usd: float
     state_hash: str
 
+    # HITL escalation
+    hitl_required: bool
+    hitl_reason: str
+
 
 class AndrewResult:
     """Structured output for ROMA bridge and human consumption."""
@@ -97,6 +101,8 @@ class AndrewResult:
         self.state_hash = state.get("state_hash", "")
         self.routing = state.get("routing_decision", "")
         self.model_used = state.get("python_model", "")
+        self.hitl_required = state.get("hitl_required", False)
+        self.hitl_reason = state.get("hitl_reason", "")
 
     @property
     def success(self) -> bool:
@@ -262,6 +268,7 @@ sandbox_retry = RetryPolicy(max_attempts=2, initial_interval=3.0, backoff_factor
 # ============================================================
 
 MAX_COST_USD = float(os.getenv("ANDREW_MAX_COST", "1.00"))
+HITL_CONFIDENCE_THRESHOLD = float(os.getenv("HITL_CONFIDENCE_THRESHOLD", "0.35"))
 
 BLOCKED_SQL_KEYWORDS = {
     "DROP", "DELETE", "TRUNCATE", "ALTER", "GRANT", "REVOKE",
@@ -752,6 +759,33 @@ def semantic_guardrails(state: AndrewState) -> Dict[str, Any]:
 # 16. NODE: Finalize
 # ============================================================
 
+def hitl_escalate(state: AndrewState) -> Dict[str, Any]:
+    """
+    Human-in-the-Loop escalation node.
+
+    Fires when confidence drops below HITL_CONFIDENCE_THRESHOLD after all
+    validation stages.  Marks the result as requiring human review and
+    summarises the reasons so downstream systems (bridge, Moltis channel,
+    UI) can surface a clear message to an operator.
+    """
+    confidence = state.get("confidence", 0.0)
+    warnings = state.get("warnings", [])
+
+    reasons: List[str] = []
+    if confidence < HITL_CONFIDENCE_THRESHOLD:
+        reasons.append(f"confidence {confidence:.2f} < threshold {HITL_CONFIDENCE_THRESHOLD:.2f}")
+    if warnings:
+        reasons.extend(warnings[:5])  # cap to keep the message readable
+
+    reason_str = "; ".join(reasons) if reasons else "low confidence"
+    _audit(state, "hitl_escalate", {"confidence": confidence, "reasons": reasons})
+    logger.warning(f"HITL escalation triggered: {reason_str}")
+    return {
+        "hitl_required": True,
+        "hitl_reason": reason_str,
+    }
+
+
 def finalize_state(state: AndrewState) -> Dict[str, Any]:
     blob = json.dumps({
         "user_request": state.get("user_request", state.get("goal")),
@@ -788,6 +822,7 @@ workflow.add_node("validate_python_static", validate_python_static)
 workflow.add_node("sandbox_execute", sandbox_execute, retry_policy=sandbox_retry)
 workflow.add_node("validate_results", validate_results)
 workflow.add_node("semantic_guardrails", semantic_guardrails)
+workflow.add_node("hitl_escalate", hitl_escalate)
 workflow.add_node("finalize_state", finalize_state)
 
 workflow.add_edge(START, "route_query_intent")
@@ -811,7 +846,12 @@ workflow.add_conditional_edges("sandbox_execute", route_on_error, {
 })
 
 workflow.add_edge("validate_results", "semantic_guardrails")
-workflow.add_edge("semantic_guardrails", "finalize_state")
+workflow.add_conditional_edges(
+    "semantic_guardrails",
+    lambda s: "hitl" if s.get("confidence", 1.0) < HITL_CONFIDENCE_THRESHOLD else "ok",
+    {"hitl": "hitl_escalate", "ok": "finalize_state"},
+)
+workflow.add_edge("hitl_escalate", "finalize_state")
 workflow.add_edge("finalize_state", END)
 
 langgraph_executor = workflow.compile()

@@ -340,6 +340,8 @@ class AndrewMoltisBridge:
             "routing": getattr(result, 'routing', 'unknown'),
             "model_used": getattr(result, 'model_used', 'unknown'),
             "channel": context.get("channel", "api"),
+            "hitl_required": getattr(result, 'hitl_required', False),
+            "hitl_reason": getattr(result, 'hitl_reason', None),
         }
 
         # 4. Format for Moltis channel delivery
@@ -473,6 +475,8 @@ class AnalyzeResponse(BaseModel):
     elapsed_seconds: float
     routing: str
     formatted_message: str
+    hitl_required: bool = False
+    hitl_reason: Optional[str] = None
 
 
 class EducateRequest(BaseModel):
@@ -518,10 +522,15 @@ async def health():
 
 
 @app.post("/analyze", response_model=AnalyzeResponse)
-async def analyze(req: AnalyzeRequest):
+async def analyze(req: AnalyzeRequest, response: Response):
     """
     Main endpoint: submit an analytical query.
-    
+
+    Returns HTTP 200 on success.
+    Returns HTTP 202 when confidence is below the HITL threshold — the
+    result is still populated but `hitl_required=true` signals that a
+    human should review before acting on the output.
+
     Moltis hooks call this when a user sends a message
     that matches the analytical intent pattern.
     """
@@ -530,7 +539,10 @@ async def analyze(req: AnalyzeRequest):
         req.query,
         context={"channel": req.channel, "user_id": req.user_id, "session_id": req.session_id},
     )
-    return AnalyzeResponse(**{k: v for k, v in result.items() if k in AnalyzeResponse.model_fields})
+    body = AnalyzeResponse(**{k: v for k, v in result.items() if k in AnalyzeResponse.model_fields})
+    if body.hitl_required:
+        response.status_code = 202
+    return body
 
 
 @app.post("/webhook/moltis")

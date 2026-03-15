@@ -212,6 +212,7 @@ DATABASE_URL=sqlite:///andrew.db
 # Limits
 ANDREW_MAX_COST=1.00
 ROMEO_MAX_TOKENS=2000
+HITL_CONFIDENCE_THRESHOLD=0.35   # results below this trigger HTTP 202 + hitl_required=true
 ```
 
 ## Roadmap
@@ -222,7 +223,7 @@ ROMEO_MAX_TOKENS=2000
 - [x] Sprint 5: Moltis integration (channels, memory, sandbox, scheduling)
 - [x] Sprint 8: Romeo PhD educational agent + Vue 3 split-view web UI
 - [x] Sprint 6: Adversarial test suite — 20 tests covering all 8 threat model cases
-- [ ] Sprint 7: HITL escalation for low-confidence results
+- [x] Sprint 7: HITL escalation — `hitl_escalate` LangGraph node, HTTP 202, 13 tests
 
 ## License
 
