@@ -273,12 +273,11 @@ class AndrewMoltisBridge:
         self._db_url = andrew_db_url or os.getenv("DATABASE_URL", "")
 
     def _get_executor(self):
-        """Lazy-load Andrew executor to avoid import-time side effects."""
+        """Lazy-load SwarmSupervisor (routes to Andrew, Romeo, or both)."""
         if self._andrew_executor is None:
-            # Import Andrew Swarm v4 — the full LangGraph pipeline
-            from core.andrew_swarm import AndrewExecutor
-            self._andrew_executor = AndrewExecutor(db_url=self._db_url)
-            logger.info("Andrew Swarm v4 executor initialized")
+            from core.supervisor import SwarmSupervisor
+            self._andrew_executor = SwarmSupervisor(db_url=self._db_url)
+            logger.info("SwarmSupervisor v1.0.0 initialized (Andrew + Romeo)")
         return self._andrew_executor
 
     async def handle_query(self, query: str, context: Optional[Dict] = None) -> Dict[str, Any]:
@@ -335,6 +334,7 @@ class AndrewMoltisBridge:
             "elapsed_seconds": round(elapsed, 2),
             "routing": getattr(result, 'routing', 'unknown'),
             "model_used": getattr(result, 'model_used', 'unknown'),
+            "agent_used": getattr(result, 'agent_used', 'andrew'),
             "channel": context.get("channel", "api"),
         }
 
