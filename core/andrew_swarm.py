@@ -850,27 +850,10 @@ class AndrewExecutor:
 
 
 # ============================================================
-# 20. CLI ENTRY POINT & SMOKE TESTS
+# 20. SMOKE TESTS
 # ============================================================
 
 if __name__ == "__main__":
-    import sys
-
-    # Live query mode: python3 core/andrew_swarm.py "<question>"
-    if len(sys.argv) > 1:
-        query = " ".join(sys.argv[1:])
-        db_url = os.getenv("DATABASE_URL", "")
-        print("=" * 70)
-        print(f"ANDREW SWARM v1.0.0-rc1 — LIVE QUERY")
-        print(f"DB: {db_url or '(none)'}")
-        print("=" * 70)
-        executor = AndrewExecutor(db_url=db_url or None)
-        result = executor.execute(query)
-        print("\n" + result.to_roma_output())
-        print("\n" + str(result))
-        sys.exit(0 if result.success else 1)
-
-    # Routing smoke tests (no args)
     print("=" * 70)
     print("ANDREW SWARM v0.4 — ROUTING SMOKE TEST")
     print("=" * 70)
