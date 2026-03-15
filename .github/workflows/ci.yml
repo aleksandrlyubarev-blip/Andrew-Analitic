@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "claude/**"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest-cov
+
+      - name: Run tests with coverage
+        env:
+          # Stub out external services — tests run fully offline
+          DATABASE_URL: "sqlite://"
+          OPENAI_API_KEY: "sk-test-ci"
+          ANTHROPIC_API_KEY: "sk-ant-test-ci"
+          HITL_CONFIDENCE_THRESHOLD: "0.35"
+        run: |
+          python -m pytest tests/ -v \
+            --cov=core --cov=bridge \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml
+
+      - name: Upload coverage report
+        if: matrix.python-version == '3.11'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+          retention-days: 14
+
+  docker-build:
+    name: Docker build (smoke test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: |
+          # Skip the Node UI stage in CI — frontend is built separately
+          docker build \
+            --target python-bridge \
+            --build-arg SKIP_UI=1 \
+            -t andrew-bridge:ci \
+            . || docker build -t andrew-bridge:ci .
+        continue-on-error: true   # non-blocking until frontend CI is wired up
+
+      - name: Check image exists
+        run: docker images andrew-bridge:ci

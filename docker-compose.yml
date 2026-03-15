@@ -1,45 +1,76 @@
-version: "3.8"
+# Andrew Analitic — local + production stack
+#
+# Quick start (dev, SQLite):
+#   cp .env.example .env   # fill in API keys
+#   docker compose up
+#
+# Production (Postgres):
+#   docker compose --profile production up
+#
 services:
   moltis:
     image: ghcr.io/moltis-org/moltis:latest
     container_name: andrew-moltis
     restart: unless-stopped
+    init: true
     ports: ["13131:13131", "13132:13132"]
     volumes:
       - moltis-config:/home/moltis/.config/moltis
       - moltis-data:/home/moltis/.moltis
       - /var/run/docker.sock:/var/run/docker.sock
-    environment: ["MOLTIS_PASSWORD=${MOLTIS_PASSWORD:-andrew2026}"]
+    environment:
+      MOLTIS_PASSWORD: "${MOLTIS_PASSWORD:-andrew2026}"
     healthcheck:
       test: ["CMD", "moltis", "doctor"]
       interval: 30s
       timeout: 10s
       retries: 3
+
   andrew-bridge:
     build: { context: ., dockerfile: Dockerfile }
     container_name: andrew-bridge
     restart: unless-stopped
-    # Port 8100: API endpoints  +  Vue UI (served at /)
+    init: true
     ports: ["8100:8100"]
     environment:
-      - MOLTIS_HOST=moltis
-      - MOLTIS_PORT=13131
-      - MOLTIS_PASSWORD=${MOLTIS_PASSWORD:-andrew2026}
-      - DATABASE_URL=${DATABASE_URL:-sqlite:///data/andrew.db}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - ANDREW_MAX_COST=1.00
-      - MODEL_ROMEO=${MODEL_ROMEO:-gpt-4o-mini}
-    volumes: [andrew-data:/data]
-    depends_on: { moltis: { condition: service_healthy } }
+      MOLTIS_HOST: moltis
+      MOLTIS_PORT: 13131
+      MOLTIS_PASSWORD: "${MOLTIS_PASSWORD:-andrew2026}"
+      DATABASE_URL: "${DATABASE_URL:-sqlite:///data/andrew.db}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+      ANDREW_MAX_COST: "${ANDREW_MAX_COST:-1.00}"
+      HITL_CONFIDENCE_THRESHOLD: "${HITL_CONFIDENCE_THRESHOLD:-0.35}"
+      MODEL_ROMEO: "${MODEL_ROMEO:-gpt-4o-mini}"
+    volumes: ["andrew-data:/data"]
+    depends_on:
+      moltis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8100/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
   postgres:
     image: postgres:16-alpine
     container_name: andrew-postgres
     restart: unless-stopped
-    environment: ["POSTGRES_DB=andrew", "POSTGRES_USER=andrew", "POSTGRES_PASSWORD=${PG_PASSWORD:-andrew2026}"]
+    init: true
+    environment:
+      POSTGRES_DB: andrew
+      POSTGRES_USER: andrew
+      POSTGRES_PASSWORD: "${PG_PASSWORD:-andrew2026}"
     ports: ["5432:5432"]
-    volumes: [pg-data:/var/lib/postgresql/data]
+    volumes: ["pg-data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U andrew"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     profiles: [production]
+
 volumes:
   moltis-config:
   moltis-data:
