@@ -1,0 +1,45 @@
+version: "3.8"
+services:
+  moltis:
+    image: ghcr.io/moltis-org/moltis:latest
+    container_name: andrew-moltis
+    restart: unless-stopped
+    ports: ["13131:13131", "13132:13132"]
+    volumes:
+      - moltis-config:/home/moltis/.config/moltis
+      - moltis-data:/home/moltis/.moltis
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment: ["MOLTIS_PASSWORD=${MOLTIS_PASSWORD:-andrew2026}"]
+    healthcheck:
+      test: ["CMD", "moltis", "doctor"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+  andrew-bridge:
+    build: { context: ., dockerfile: Dockerfile }
+    container_name: andrew-bridge
+    restart: unless-stopped
+    ports: ["8100:8100"]
+    environment:
+      - MOLTIS_HOST=moltis
+      - MOLTIS_PORT=13131
+      - MOLTIS_PASSWORD=${MOLTIS_PASSWORD:-andrew2026}
+      - DATABASE_URL=${DATABASE_URL:-sqlite:///data/andrew.db}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - ANDREW_MAX_COST=1.00
+    volumes: [andrew-data:/data]
+    depends_on: { moltis: { condition: service_healthy } }
+  postgres:
+    image: postgres:16-alpine
+    container_name: andrew-postgres
+    restart: unless-stopped
+    environment: ["POSTGRES_DB=andrew", "POSTGRES_USER=andrew", "POSTGRES_PASSWORD=${PG_PASSWORD:-andrew2026}"]
+    ports: ["5432:5432"]
+    volumes: [pg-data:/var/lib/postgresql/data]
+    profiles: [production]
+volumes:
+  moltis-config:
+  moltis-data:
+  andrew-data:
+  pg-data:

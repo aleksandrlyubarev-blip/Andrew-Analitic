@@ -1,0 +1,2 @@
+"""Andrew Swarm Core — LangGraph analytical engine."""
+__version__ = "1.0.0-rc1"
