@@ -271,6 +271,8 @@ class AndrewMoltisBridge:
         self.store_results = store_results_in_memory
         self._andrew_executor = None
         self._db_url = andrew_db_url or os.getenv("DATABASE_URL", "")
+        from bridge.hitl import HitlGate
+        self.hitl = HitlGate()
 
     def _get_executor(self):
         """Lazy-load SwarmSupervisor (routes to Andrew, Romeo, or both)."""
@@ -338,10 +340,35 @@ class AndrewMoltisBridge:
             "channel": context.get("channel", "api"),
         }
 
-        # 4. Format for Moltis channel delivery
+        # 4. HITL gate — review low-confidence results before delivery
+        hitl_outcome = await self.hitl.check(
+            query=query,
+            output=response["narrative"],
+            confidence=response["confidence"],
+            routing=response["routing"],
+            agent_used=response["agent_used"],
+            warnings=response["warnings"],
+            cost_usd=response["cost_usd"],
+            sql_query=response.get("sql_query"),
+        )
+        if hitl_outcome.triggered:
+            response["narrative"] = hitl_outcome.output
+            response["warnings"] = hitl_outcome.warnings
+            response["hitl_decision"] = hitl_outcome.decision
+            response["hitl_review_id"] = hitl_outcome.review_id
+            if hitl_outcome.decision == "reject":
+                response["success"] = False
+                response["error"] = "Result rejected by human reviewer"
+            elif hitl_outcome.timed_out:
+                response["warnings"] = hitl_outcome.warnings  # includes timeout note
+        else:
+            response["hitl_decision"] = "skipped"
+            response["hitl_review_id"] = None
+
+        # 5. Format for Moltis channel delivery
         response["formatted_message"] = self._format_for_channel(response)
 
-        # 5. Store in Moltis memory for future context
+        # 6. Store in Moltis memory for future context
         if self.store_results and result.success:
             try:
                 await self.moltis.store_memory(
