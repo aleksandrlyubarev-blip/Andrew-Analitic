@@ -83,6 +83,13 @@ class AndrewState(TypedDict, total=False):
     hitl_required: bool
     hitl_reason: str
 
+    # Semantic routing (Sprint 5)
+    routing_log: Dict[str, Any]
+    session_id: str
+    session_summary: str
+    session_length: int
+    memory_records_retrieved: int
+
 
 class AndrewResult:
     """Structured output for ROMA bridge and human consumption."""
@@ -221,37 +228,52 @@ def _match_keywords(request: str) -> List[Tuple[str, int]]:
 
 def route_query_intent(state: AndrewState) -> Dict[str, Any]:
     """
-    Score-based routing to 3 lanes:
-    - reasoning_math: heavy ML, score >= 4, or known heavy terms
-    - analytics_fastlane: light math + analytics context
-    - standard: everything else (BI, charts, simple queries)
+    Semantic routing (Sprint 5 §4) — embedding-based cosine similarity against
+    the Capability Registry.  Falls back to keyword scoring when embeddings are
+    unavailable (no API key, test environment, etc.).
+
+    Routing lanes:
+      reasoning_math      — heavy ML / forecasting / simulation
+      standard_analytics  — SQL, cohorts, BI reports
+      analytics_fastlane  — simple aggregations, quick charts
     """
+    from core.semantic_router import _semantic_router  # lazy import avoids circular
+
     request = _normalize(state.get("user_request", state.get("goal", "")))
+
+    routing_log = _semantic_router.route(
+        query=request,
+        session_summary=state.get("session_summary"),
+        session_length=state.get("session_length", 0),
+        memory_records_retrieved=state.get("memory_records_retrieved", 0),
+    )
+    route = routing_log.selected_agent
+
+    # Map registry agent_id → model registry key
+    _model_map = {
+        "reasoning_math":     MODEL_REGISTRY["reasoning_math"],
+        "standard_analytics": MODEL_REGISTRY["default_python"],
+        "analytics_fastlane": MODEL_REGISTRY["analytics_fastlane"],
+    }
+    model = _model_map.get(route, MODEL_REGISTRY["default_python"])
+
+    # Keep legacy keyword fields for backward compatibility
     hits = _match_keywords(request)
-    score = sum(w for _, w in hits)
-
-    has_light = any(t in request for t in LIGHT_ANALYTICS_TERMS)
-    has_heavy = any(t in request for t in HEAVY_ML_TERMS)
-
-    if has_heavy or score >= 4:
-        model = MODEL_REGISTRY["reasoning_math"]
-        route = "reasoning_math"
-    elif hits and has_light:
-        model = MODEL_REGISTRY["analytics_fastlane"]
-        route = "analytics_fastlane"
-    else:
-        model = MODEL_REGISTRY["default_python"]
-        route = "standard"
-
     matched_terms = [kw for kw, _ in hits]
-    logger.info(f"Route: {route} (score={score}, hits={matched_terms}) → {model}")
+    keyword_score = sum(w for _, w in hits)
+
+    logger.info(
+        f"Route: {route} (semantic_score={routing_log.top_score:.3f}, "
+        f"fallback={routing_log.fallback_used}) → {model}"
+    )
 
     return {
         "python_model": model,
         "orchestrator_model": MODEL_REGISTRY["default_orchestrator"],
         "routing_decision": route,
-        "routing_score": score,
+        "routing_score": keyword_score,
         "routing_hits": matched_terms,
+        "routing_log": routing_log.as_dict(),
     }
 
 

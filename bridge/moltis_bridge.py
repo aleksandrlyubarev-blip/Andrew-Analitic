@@ -11,10 +11,11 @@ Moltis provides the "hands":
   - GraphQL API: /graphql with subscriptions
 
 Andrew provides the "brain":
-  - Weighted query routing (48 keywords, 3 lanes)
+  - Semantic routing (embedding cosine scoring, Capability Registry, Sprint 5)
   - SQL generation + sqlglot qualify validation
   - Python code generation + AST safety checks
   - Deterministic result validation + semantic guardrails
+  - HITL escalation for low-confidence results (Sprint 7)
 
 Integration pattern:
   Moltis (Rust) ←→ MoltisBridge (Python, this file) ←→ Andrew Swarm v4 (LangGraph)
@@ -44,6 +45,17 @@ from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO, format="%(name)s | %(levelname)s | %(message)s")
 logger = logging.getLogger("moltis_bridge")
+
+
+# ============================================================
+# Episodic Memory Store (Sprint 5 §5.1)
+# ============================================================
+# Session-scoped in-process store: {session_id -> [{"role", "content", "ts"}]}
+# Cleared on process restart; a durable store (Redis / Moltis) can replace this.
+
+_episodic_store: Dict[str, List[Dict[str, Any]]] = {}
+SEMANTIC_RELEVANCE_THRESHOLD = float(os.getenv("SEMANTIC_RELEVANCE_THRESHOLD", "0.65"))
+EPISODIC_MAX_ENTRIES = int(os.getenv("EPISODIC_MAX_ENTRIES", "20"))
 
 
 # ============================================================
@@ -297,57 +309,94 @@ class AndrewMoltisBridge:
         """
         context = context or {}
         start_time = time.time()
-        logger.info(f"Bridge received: {query[:80]}...")
+        session_id = context.get("session_id") or "default"
+        logger.info(f"Bridge received: {query[:80]}... [session={session_id}]")
 
-        # 1. Check for relevant past analyses in Moltis memory
+        # ── 1. Episodic memory (§5.1) — session-scoped facts ─────────────────
+        episodic = _episodic_store.setdefault(session_id, [])
+        episodic.append({"role": "user", "content": query, "ts": time.time()})
+        # Trim to max window
+        if len(episodic) > EPISODIC_MAX_ENTRIES:
+            _episodic_store[session_id] = episodic[-EPISODIC_MAX_ENTRIES:]
+            episodic = _episodic_store[session_id]
+
+        episodic_context = ""
+        if len(episodic) > 1:
+            episodic_context = "\n".join(
+                f"[{e['role']}] {e['content'][:200]}" for e in episodic[:-1]
+            )
+
+        # Session summary for semantic router δ term (last N=10 turns joined)
+        session_summary = " | ".join(e["content"][:80] for e in episodic[-10:]) or None
+
+        # ── 2. Semantic memory (§5.2) — persistent knowledge, 0.65 threshold ─
+        semantic_memories: List[Dict] = []
         memory_context = ""
         if self.store_results:
             try:
-                memories = await self.moltis.recall_memory(query, limit=3)
-                if memories:
+                raw_memories = await self.moltis.recall_memory(query, limit=5)
+                # Apply §5.3 relevance threshold
+                semantic_memories = [
+                    m for m in (raw_memories or [])
+                    if m.get("score", 0.0) >= SEMANTIC_RELEVANCE_THRESHOLD
+                ]
+                if semantic_memories:
                     memory_context = "\n".join(
-                        f"- Prior analysis (relevance {m.get('score', 0):.2f}): {m.get('content', '')[:200]}"
-                        for m in memories
+                        f"- Prior analysis (relevance {m['score']:.2f}): {m.get('content', '')[:200]}"
+                        for m in semantic_memories
                     )
-                    logger.info(f"Found {len(memories)} relevant memories")
+                    logger.info(
+                        f"Semantic memory: {len(semantic_memories)}/{len(raw_memories or [])} "
+                        f"records above threshold {SEMANTIC_RELEVANCE_THRESHOLD}"
+                    )
             except Exception as e:
                 logger.warning(f"Memory recall failed (non-fatal): {e}")
 
-        # 2. Run Andrew's LangGraph pipeline
-        executor = self._get_executor()
-
-        # Enrich query with memory context if available
+        # ── 3. Context assembly (§6 step 3) ──────────────────────────────────
         enriched_query = query
+        context_parts = []
+        if episodic_context:
+            context_parts.append(f"[Session history:\n{episodic_context}]")
         if memory_context:
-            enriched_query = f"{query}\n\n[Context from prior analyses:\n{memory_context}]"
+            context_parts.append(f"[Long-term context:\n{memory_context}]")
+        if context_parts:
+            enriched_query = query + "\n\n" + "\n".join(context_parts)
 
-        # Andrew's execute() is synchronous — run in thread pool
+        # ── 4. Run Andrew's LangGraph pipeline ───────────────────────────────
+        executor = self._get_executor()
         result = await asyncio.to_thread(executor.execute, enriched_query)
         elapsed = time.time() - start_time
 
-        # 3. Build structured response
+        # ── 5. Write result to episodic memory (§6 step 6a) ──────────────────
+        output_snippet = (result.output or result.error or "")[:300]
+        episodic.append({"role": "assistant", "content": output_snippet, "ts": time.time()})
+
+        # ── 6. Build structured response ──────────────────────────────────────
         response = {
             "query": query,
-            "narrative": result.output if hasattr(result, 'output') else str(result.raw_data or ""),
+            "narrative": result.output if hasattr(result, "output") else str(result.raw_data or ""),
             "sql_query": result.sql_query,
-            "query_results": getattr(result, 'query_results', []) or [],
+            "query_results": getattr(result, "query_results", []) or [],
             "confidence": result.confidence,
-            "cost_usd": result.cost_usd if hasattr(result, 'cost_usd') else result.cost,
-            "warnings": result.warnings if hasattr(result, 'warnings') else [],
+            "cost_usd": result.cost_usd if hasattr(result, "cost_usd") else result.cost,
+            "warnings": result.warnings if hasattr(result, "warnings") else [],
             "success": result.success,
-            "error": result.error_message if hasattr(result, 'error_message') else result.error,
+            "error": result.error_message if hasattr(result, "error_message") else result.error,
             "elapsed_seconds": round(elapsed, 2),
-            "routing": getattr(result, 'routing', 'unknown'),
-            "model_used": getattr(result, 'model_used', 'unknown'),
+            "routing": getattr(result, "routing", "unknown"),
+            "model_used": getattr(result, "model_used", "unknown"),
             "channel": context.get("channel", "api"),
-            "hitl_required": getattr(result, 'hitl_required', False),
-            "hitl_reason": getattr(result, 'hitl_reason', None),
+            "hitl_required": getattr(result, "hitl_required", False),
+            "hitl_reason": getattr(result, "hitl_reason", None),
+            "session_id": session_id,
+            "session_length": len(episodic),
+            "memory_records_retrieved": len(semantic_memories),
         }
 
-        # 4. Format for Moltis channel delivery
+        # ── 7. Format for Moltis channel delivery ─────────────────────────────
         response["formatted_message"] = self._format_for_channel(response)
 
-        # 5. Store in Moltis memory for future context
+        # ── 8. Store in semantic memory (§5.4, §6 step 6b) ───────────────────
         if self.store_results and result.success:
             try:
                 await self.moltis.store_memory(
@@ -357,15 +406,18 @@ class AndrewMoltisBridge:
                         "sql": result.sql_query,
                         "timestamp": time.time(),
                         "cost": response["cost_usd"],
+                        "session_id": session_id,
                     },
                 )
-                logger.info("Analysis stored in Moltis memory")
+                logger.info("Analysis stored in semantic memory")
             except Exception as e:
                 logger.warning(f"Memory store failed (non-fatal): {e}")
 
         logger.info(
             f"Bridge completed: confidence={response['confidence']:.2f}, "
-            f"cost=${response['cost_usd']:.4f}, elapsed={elapsed:.1f}s"
+            f"cost=${response['cost_usd']:.4f}, elapsed={elapsed:.1f}s, "
+            f"session_len={response['session_length']}, "
+            f"semantic_memories={response['memory_records_retrieved']}"
         )
         return response
 
@@ -477,6 +529,9 @@ class AnalyzeResponse(BaseModel):
     formatted_message: str
     hitl_required: bool = False
     hitl_reason: Optional[str] = None
+    session_id: Optional[str] = None
+    session_length: int = 0
+    memory_records_retrieved: int = 0
 
 
 class EducateRequest(BaseModel):
