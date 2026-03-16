@@ -2,7 +2,7 @@
 
 > Andrew Swarm analyses data. Romeo PhD explains it. One dark-themed UI to rule them both.
 
-**Release: v1.1.0** — Romeo PhD agent + Vue 3 web UI added.
+**Release: v1.3.0** — Rate limiting, adversarial test suite, HITL escalation, semantic routing, memory architecture.
 
 ## What It Does
 
@@ -133,15 +133,18 @@ Romeo PhD always uses `MODEL_ROMEO` (default: `gpt-4o-mini`).
 
 ## Security Posture
 
-This is an MVP. The following guardrails are implemented but not formally audited:
+The following guardrails are implemented and covered by the adversarial test suite (Sprint 6):
 
 - **SQL safety:** sqlglot `qualify(schema=...)` validates every table and column against the real schema. Blocked keywords: DROP, DELETE, TRUNCATE, ALTER, and 13 others. Only SELECT/WITH statements allowed.
 - **Python safety:** AST analysis blocks `import os`, `subprocess`, `exec()`, `eval()`, `open()` before code reaches the sandbox. Data leakage detection flags `fit_transform` before `train_test_split`.
 - **Sandbox isolation:** Moltis runs generated code in per-session Docker containers. No host filesystem access.
 - **Budget guard:** Hard cap at $1.00 per query (configurable). Stops LLM calls when exhausted.
 - **Semantic guardrails:** Checks that SQL output matches user intent (revenue question must reference revenue column, monthly question must have GROUP BY).
+- **Adversarial test suite:** 20 tests covering all 8 threat model cases — hallucinated tables/columns, destructive SQL, intent mismatch, data leakage, dangerous Python, budget exhaustion, prompt injection.
+- **HITL escalation:** Results with confidence below `HITL_CONFIDENCE_THRESHOLD` return HTTP 202 + `hitl_required=true` for human review before acting.
+- **Rate limiting:** Per-IP sliding-window rate limiter on `/analyze` (10 req/min), `/educate` (20 req/min), and `/webhook/moltis` (30 req/min). Returns HTTP 429 + `Retry-After` on excess. Configurable via env vars; no Redis required.
 
-**Not yet implemented:** formal threat model testing, adversarial fuzz suite, HITL escalation for low-confidence results, rate limiting on the bridge API.
+**Not yet implemented:** formal third-party security audit, distributed rate limiting (current limiter is in-process only — does not coordinate across multiple bridge replicas).
 
 ## API Endpoints
 
@@ -160,9 +163,11 @@ This is an MVP. The following guardrails are implemented but not formally audite
 andrew-swarm/
   core/
     andrew_swarm.py       # LangGraph analytical engine
+    semantic_router.py    # Semantic routing + ProceduralStore
+    memory.py             # ConsolidationEngine, InProcessSemanticStore, staleness sweep
     romeo_phd.py          # Romeo PhD educational agent
   bridge/
-    moltis_bridge.py      # FastAPI bridge: API + static UI server
+    moltis_bridge.py      # FastAPI bridge: API + rate limiting + memory pipeline
     static/               # Compiled Vue UI (git-ignored, built by Dockerfile)
   frontend/               # Vue 3 + Vite source
     src/
@@ -174,8 +179,13 @@ andrew-swarm/
   config/
     .env.example
   tests/
-    test_routing.py
-    test_validation.py
+    test_routing.py       # 12 routing smoke tests
+    test_validation.py    # 15 validation tests
+    test_adversarial.py   # 20 adversarial tests (8 threat vectors)
+    test_hitl.py          # 13 HITL escalation tests
+    test_semantic_router.py  # 30 semantic router tests
+    test_memory.py        # 28 memory + consolidation tests
+    test_rate_limit.py    # 22 rate-limiter tests
   docs/
     ARCHITECTURE.md
     CHANGELOG.md
@@ -213,6 +223,11 @@ DATABASE_URL=sqlite:///andrew.db
 ANDREW_MAX_COST=1.00
 ROMEO_MAX_TOKENS=2000
 HITL_CONFIDENCE_THRESHOLD=0.35   # results below this trigger HTTP 202 + hitl_required=true
+
+# Rate limiting (N requests per W seconds per IP; set N=0 to disable)
+RATE_LIMIT_ANALYZE=10/60
+RATE_LIMIT_EDUCATE=20/60
+RATE_LIMIT_WEBHOOK=30/60
 ```
 
 ## Roadmap
@@ -220,10 +235,10 @@ HITL_CONFIDENCE_THRESHOLD=0.35   # results below this trigger HTTP 202 + hitl_re
 - [x] Sprint 1-2: LangGraph pipeline + LiteLLM routing
 - [x] Sprint 3: Hardened validation (sqlglot qualify, AST safety, Pandera)
 - [x] Sprint 4: Weighted 48-keyword routing, model registry, provider adapters
-- [x] Sprint 5: Moltis integration (channels, memory, sandbox, scheduling)
-- [x] Sprint 8: Romeo PhD educational agent + Vue 3 split-view web UI
-- [x] Sprint 6: Adversarial test suite — 20 tests covering all 8 threat model cases
+- [x] Sprint 5: Moltis integration + Semantic Router + Memory Architecture (procedural + consolidation + staleness sweep)
+- [x] Sprint 6: Adversarial test suite (20 tests, 8 threat vectors) + Bridge rate limiting (22 tests, HTTP 429, `Retry-After`)
 - [x] Sprint 7: HITL escalation — `hitl_escalate` LangGraph node, HTTP 202, 13 tests
+- [x] Sprint 8: Romeo PhD educational agent + Vue 3 split-view web UI
 
 ## License
 

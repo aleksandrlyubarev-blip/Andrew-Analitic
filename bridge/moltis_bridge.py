@@ -28,14 +28,17 @@ The bridge runs as a FastAPI service that:
 """
 
 import asyncio
+import collections
 import hashlib
 import json
 import logging
 import os
+import threading
 import time
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -45,6 +48,117 @@ from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO, format="%(name)s | %(levelname)s | %(message)s")
 logger = logging.getLogger("moltis_bridge")
+
+
+# ============================================================
+# Rate Limiting (Sprint 6 security hardening)
+# ============================================================
+# Per-IP sliding-window rate limiter.  Fully in-process — no Redis needed.
+# Configure via env vars:
+#   RATE_LIMIT_ANALYZE   default "10/60"   → 10 requests per 60 s per IP
+#   RATE_LIMIT_EDUCATE   default "20/60"   → 20 requests per 60 s per IP
+#   RATE_LIMIT_WEBHOOK   default "30/60"   → 30 requests per 60 s per IP
+# Set to "0/60" to disable a limiter entirely.
+
+
+def _parse_rate_spec(spec: str, default_req: int, default_win: int) -> Tuple[int, int]:
+    """Parse 'N/W' into (max_requests, window_seconds). Returns defaults on error."""
+    try:
+        req_str, win_str = spec.split("/", 1)
+        return int(req_str), int(win_str)
+    except Exception:
+        return default_req, default_win
+
+
+class SlidingWindowRateLimiter:
+    """
+    Thread-safe per-key sliding-window rate limiter.
+
+    Each key (typically a client IP) gets an independent window.
+    is_allowed() is O(k) where k is the number of requests in the window —
+    typically very small.
+    """
+
+    def __init__(self, max_requests: int, window_seconds: int) -> None:
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self._windows: Dict[str, deque] = defaultdict(deque)
+        self._lock = threading.Lock()
+
+    def is_allowed(self, key: str) -> Tuple[bool, int]:
+        """
+        Check whether the key may make another request right now.
+
+        Returns:
+            (True, 0)           — request allowed
+            (False, retry_after) — denied; caller should wait retry_after seconds
+        """
+        if self.max_requests == 0:
+            return True, 0                  # limiter disabled
+
+        now = time.time()
+        cutoff = now - self.window_seconds
+
+        with self._lock:
+            window = self._windows[key]
+            # Evict timestamps older than the window
+            while window and window[0] <= cutoff:
+                window.popleft()
+
+            if len(window) >= self.max_requests:
+                # How many seconds until the oldest slot expires
+                retry_after = max(1, int(window[0] - cutoff) + 1)
+                return False, retry_after
+
+            window.append(now)
+            return True, 0
+
+    def reset(self, key: str) -> None:
+        """Clear all recorded timestamps for a key (test helper)."""
+        with self._lock:
+            self._windows.pop(key, None)
+
+    def __repr__(self) -> str:
+        return (
+            f"SlidingWindowRateLimiter(max={self.max_requests}, "
+            f"window={self.window_seconds}s)"
+        )
+
+
+def _build_limiter(env_var: str, default_req: int, default_win: int) -> SlidingWindowRateLimiter:
+    spec = os.getenv(env_var, f"{default_req}/{default_win}")
+    req, win = _parse_rate_spec(spec, default_req, default_win)
+    limiter = SlidingWindowRateLimiter(req, win)
+    logger.info(f"RateLimit {env_var}: {limiter}")
+    return limiter
+
+
+# Module-level limiter instances (one per rate-limited endpoint)
+_limiter_analyze = _build_limiter("RATE_LIMIT_ANALYZE", 10, 60)
+_limiter_educate = _build_limiter("RATE_LIMIT_EDUCATE", 20, 60)
+_limiter_webhook = _build_limiter("RATE_LIMIT_WEBHOOK", 30, 60)
+
+
+def _client_ip(request: Request) -> str:
+    """Extract the real client IP, honoring X-Forwarded-For from reverse proxies."""
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    if request.client:
+        return request.client.host
+    return "unknown"
+
+
+def _check_rate_limit(limiter: SlidingWindowRateLimiter, request: Request) -> None:
+    """Raise HTTP 429 if the client has exceeded its rate limit."""
+    ip = _client_ip(request)
+    allowed, retry_after = limiter.is_allowed(ip)
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded. Retry after {retry_after}s.",
+            headers={"Retry-After": str(retry_after)},
+        )
 
 
 # ============================================================
@@ -611,7 +725,7 @@ async def health():
 
 
 @app.post("/analyze", response_model=AnalyzeResponse)
-async def analyze(req: AnalyzeRequest, response: Response):
+async def analyze(req: AnalyzeRequest, response: Response, request: Request):
     """
     Main endpoint: submit an analytical query.
 
@@ -619,10 +733,12 @@ async def analyze(req: AnalyzeRequest, response: Response):
     Returns HTTP 202 when confidence is below the HITL threshold — the
     result is still populated but `hitl_required=true` signals that a
     human should review before acting on the output.
+    Returns HTTP 429 when the per-IP rate limit is exceeded.
 
     Moltis hooks call this when a user sends a message
     that matches the analytical intent pattern.
     """
+    _check_rate_limit(_limiter_analyze, request)
     bridge = get_bridge()
     result = await bridge.handle_query(
         req.query,
@@ -638,12 +754,14 @@ async def analyze(req: AnalyzeRequest, response: Response):
 async def moltis_webhook(request: Request):
     """
     Webhook endpoint for Moltis hook system.
-    
+    Returns HTTP 429 when the per-IP rate limit is exceeded.
+
     Configure in Moltis HOOK.md:
         name: andrew-analytics
         event: MessageReceived
         handler: http://localhost:8100/webhook/moltis
     """
+    _check_rate_limit(_limiter_webhook, request)
     body = await request.json()
     message = body.get("message", {}).get("content", "")
     channel = body.get("channel", "unknown")
@@ -678,14 +796,16 @@ async def moltis_webhook(request: Request):
 
 
 @app.post("/educate", response_model=EducateResponse)
-async def educate(req: EducateRequest):
+async def educate(req: EducateRequest, request: Request):
     """
     Ask Romeo PhD an educational question.
+    Returns HTTP 429 when the per-IP rate limit is exceeded.
 
     Romeo handles conceptual, theoretical, and explanatory queries about
     data science, ML, statistics, mathematics, and programming.
     Returns a Markdown-formatted explanation.
     """
+    _check_rate_limit(_limiter_educate, request)
     from core.romeo_phd import RomeoExecutor  # lazy import — keeps bridge fast when unused
 
     executor = RomeoExecutor()
