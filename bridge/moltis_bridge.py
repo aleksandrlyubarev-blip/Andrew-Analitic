@@ -57,6 +57,10 @@ _episodic_store: Dict[str, List[Dict[str, Any]]] = {}
 SEMANTIC_RELEVANCE_THRESHOLD = float(os.getenv("SEMANTIC_RELEVANCE_THRESHOLD", "0.65"))
 EPISODIC_MAX_ENTRIES = int(os.getenv("EPISODIC_MAX_ENTRIES", "20"))
 
+# Shared memory + router singletons (Sprint 5 §5.4)
+from core.memory import _semantic_store, _consolidation_engine  # noqa: E402
+from core.semantic_router import _semantic_router                # noqa: E402
+
 
 # ============================================================
 # Configuration
@@ -396,22 +400,34 @@ class AndrewMoltisBridge:
         # ── 7. Format for Moltis channel delivery ─────────────────────────────
         response["formatted_message"] = self._format_for_channel(response)
 
-        # ── 8. Store in semantic memory (§5.4, §6 step 6b) ───────────────────
+        # ── 8. Procedural feedback (§5.4 post-execution) ─────────────────────
+        # Fire-and-forget: does not block the response path.
+        routing_decision = result.routing or "standard_analytics"
+        asyncio.create_task(
+            asyncio.to_thread(
+                _semantic_router.record_outcome, query, routing_decision, result.success
+            )
+        )
+
+        # ── 9. Store in semantic memory (§5.4, §6 step 6b) ───────────────────
         if self.store_results and result.success:
+            mem_content = f"Query: {query}\nResult: {response['narrative'][:500]}"
+            mem_meta = {
+                "confidence": response["confidence"],
+                "sql": result.sql_query,
+                "timestamp": time.time(),
+                "cost": response["cost_usd"],
+                "session_id": session_id,
+            }
             try:
-                await self.moltis.store_memory(
-                    content=f"Query: {query}\nResult: {response['narrative'][:500]}",
-                    metadata={
-                        "confidence": response["confidence"],
-                        "sql": result.sql_query,
-                        "timestamp": time.time(),
-                        "cost": response["cost_usd"],
-                        "session_id": session_id,
-                    },
-                )
-                logger.info("Analysis stored in semantic memory")
+                await self.moltis.store_memory(content=mem_content, metadata=mem_meta)
+                logger.info("Analysis stored in Moltis semantic memory")
             except Exception as e:
-                logger.warning(f"Memory store failed (non-fatal): {e}")
+                logger.warning(f"Moltis memory store failed (non-fatal): {e}")
+            # Mirror into in-process store for consolidation + staleness tracking
+            emb = await asyncio.to_thread(_semantic_router.embed, query)
+            if emb:
+                _semantic_store.upsert(mem_content, emb, metadata=mem_meta)
 
         logger.info(
             f"Bridge completed: confidence={response['confidence']:.2f}, "
@@ -420,6 +436,24 @@ class AndrewMoltisBridge:
             f"semantic_memories={response['memory_records_retrieved']}"
         )
         return response
+
+    async def end_session(self, session_id: str) -> Optional[str]:
+        """
+        Explicitly close a session: consolidate episodic memory into the
+        semantic store (§5.4 "End of session").
+
+        Returns the record_id of the stored/merged semantic record, or None.
+        Called by the /end_session API endpoint or a channel disconnect hook.
+        """
+        episodic = _episodic_store.pop(session_id, [])
+        if not episodic:
+            logger.debug(f"end_session: nothing to consolidate for {session_id}")
+            return None
+        record_id = await asyncio.to_thread(
+            _consolidation_engine.consolidate_session, session_id, episodic
+        )
+        logger.info(f"end_session: consolidated {len(episodic)} entries → {record_id}")
+        return record_id
 
     def _format_for_channel(self, response: Dict) -> str:
         """
@@ -671,6 +705,33 @@ async def schedule_analysis(req: ScheduleRequest):
     if success:
         return {"status": "scheduled", "schedule": req.cron_schedule, "query": req.query}
     raise HTTPException(status_code=500, detail="Failed to create cron job in Moltis")
+
+
+@app.on_event("startup")
+async def startup():
+    """Schedule the daily staleness sweep background task."""
+    async def _sweep_loop():
+        SWEEP_INTERVAL_S = int(os.getenv("STALENESS_SWEEP_INTERVAL_S", str(24 * 3600)))
+        while True:
+            await asyncio.sleep(SWEEP_INTERVAL_S)
+            try:
+                result = await asyncio.to_thread(_consolidation_engine.staleness_sweep)
+                logger.info(f"Daily staleness sweep: {result}")
+            except Exception as exc:
+                logger.warning(f"Staleness sweep failed: {exc}")
+
+    asyncio.create_task(_sweep_loop())
+
+
+@app.post("/session/{session_id}/end")
+async def end_session(session_id: str):
+    """
+    Explicitly close a session and consolidate episodic → semantic memory.
+    Called by channel disconnect hooks or explicit user action.
+    """
+    bridge = get_bridge()
+    record_id = await bridge.end_session(session_id)
+    return {"session_id": session_id, "consolidated_record": record_id}
 
 
 @app.on_event("shutdown")

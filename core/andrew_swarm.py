@@ -107,6 +107,7 @@ class AndrewResult:
         self.audit_log = state.get("audit_log", [])
         self.state_hash = state.get("state_hash", "")
         self.routing = state.get("routing_decision", "")
+        self.routing_log = state.get("routing_log", {})
         self.model_used = state.get("python_model", "")
         self.hitl_required = state.get("hitl_required", False)
         self.hitl_reason = state.get("hitl_reason", "")
@@ -887,6 +888,14 @@ class AndrewExecutor:
     def __init__(self, db_url: Optional[str] = None):
         self.db_url = db_url or os.getenv("DATABASE_URL", "")
         self._schema: Optional[Dict] = None
+        # Initialise Capability Registry embeddings (Sprint 5 §3).
+        # No-ops silently when the embedding API is unavailable; keyword
+        # fallback in SemanticRouter stays active in that case.
+        try:
+            from core.semantic_router import init_registry
+            init_registry()
+        except Exception as _exc:
+            logger.debug(f"Semantic registry init skipped: {_exc}")
 
     @property
     def schema(self) -> Dict[str, Dict[str, str]]:

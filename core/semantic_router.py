@@ -98,6 +98,94 @@ class RoutingLog:
         }
 
 
+# ── Procedural Memory (§5.1 table) ────────────────────────────────────────────
+
+@dataclass
+class ProceduralRecord:
+    """One learned routing pattern: a past query embedding + outcome counts."""
+    agent_id: str
+    query_embedding: List[float]
+    success_count: int = 0
+    fail_count: int = 0
+    last_updated: float = field(default_factory=lambda: __import__("time").time())
+
+    @property
+    def success_rate(self) -> float:
+        total = self.success_count + self.fail_count
+        return self.success_count / total if total > 0 else 0.5
+
+
+class ProceduralStore:
+    """
+    Stores past query→agent routing outcomes for use as a routing prior.
+
+    Consumed only by the routing layer (§5.1).  Not passed to agents.
+    Updated asynchronously after successful/failed completions (§5.4).
+    """
+
+    # Two thresholds:
+    #   MERGE_SIM  — past record is "same query" → merge counts rather than insert
+    #   BIAS_SIM   — minimum similarity for a past record to influence routing
+    MERGE_SIM = 0.95
+    BIAS_SIM = 0.75
+
+    def __init__(self) -> None:
+        self._records: List[ProceduralRecord] = []
+        self._lock = threading.RLock()
+
+    def record(self, query_embedding: List[float], agent_id: str, success: bool) -> None:
+        """Record a routing outcome.  Merges with an existing similar record if found."""
+        import time as _time
+        with self._lock:
+            for rec in self._records:
+                if (rec.agent_id == agent_id
+                        and cosine_similarity(query_embedding, rec.query_embedding) >= self.MERGE_SIM):
+                    if success:
+                        rec.success_count += 1
+                    else:
+                        rec.fail_count += 1
+                    rec.last_updated = _time.time()
+                    return
+            self._records.append(ProceduralRecord(
+                agent_id=agent_id,
+                query_embedding=query_embedding,
+                success_count=1 if success else 0,
+                fail_count=0 if success else 1,
+            ))
+
+    def bias(
+        self,
+        query_embedding: List[float],
+        agent_id: str,
+        top_k: int = 5,
+    ) -> float:
+        """
+        Return a score in [0, 1] representing how well this agent handled
+        past queries similar to the current one.
+
+        Returns 0.0 when no prior data exists (no bias either way).
+        """
+        with self._lock:
+            candidates = [
+                (cosine_similarity(query_embedding, r.query_embedding), r)
+                for r in self._records
+                if r.agent_id == agent_id
+                and cosine_similarity(query_embedding, r.query_embedding) >= self.BIAS_SIM
+            ]
+        if not candidates:
+            return 0.0
+        # Weight success_rate by similarity, take top-k
+        top = sorted(candidates, reverse=True)[:top_k]
+        total_weight = sum(sim for sim, _ in top)
+        if total_weight < 1e-9:
+            return 0.0
+        return sum(sim * rec.success_rate for sim, rec in top) / total_weight
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._records)
+
+
 # ── Capability Registry ───────────────────────────────────────────────────────
 
 class CapabilityRegistry:
@@ -257,6 +345,8 @@ class SemanticRouter:
         beta: float = 0.60,
         gamma: float = 0.10,
         delta: float = 0.15,
+        epsilon: float = 0.10,          # procedural memory bias weight
+        procedural_store: Optional["ProceduralStore"] = None,
     ) -> None:
         self.registry = registry
         self.embed_model = embed_model
@@ -267,6 +357,8 @@ class SemanticRouter:
         self.beta = beta
         self.gamma = gamma
         self.delta = delta
+        self.epsilon = epsilon
+        self.procedural_store = procedural_store
 
     # ── Embedding ─────────────────────────────────────────────────────────────
 
@@ -338,11 +430,24 @@ class SemanticRouter:
                 top_score = 0.0
                 fallback_used = True
             else:
-                scored = sorted(
-                    [(rec.agent_id, self.score(query_emb, rec, session_emb)) for rec in records],
-                    key=lambda x: x[1],
-                    reverse=True,
-                )
+                # Base cosine scores
+                base_scored = [
+                    (rec.agent_id, self.score(query_emb, rec, session_emb))
+                    for rec in records
+                ]
+                # Add procedural bias (ε term) when store has data
+                if self.procedural_store:
+                    scored = sorted(
+                        [
+                            (aid, s + self.epsilon * self.procedural_store.bias(query_emb, aid))
+                            for aid, s in base_scored
+                        ],
+                        key=lambda x: x[1],
+                        reverse=True,
+                    )
+                else:
+                    scored = sorted(base_scored, key=lambda x: x[1], reverse=True)
+
                 top_agent_id, top_score = scored[0]
                 runner_up_score = scored[1][1] if len(scored) > 1 else 0.0
 
@@ -372,6 +477,24 @@ class SemanticRouter:
             f"runner_up={runner_up_score:.3f})"
         )
         return log
+
+    # ── Procedural feedback (§5.4) ────────────────────────────────────────────
+
+    def record_outcome(self, query: str, agent_id: str, success: bool) -> None:
+        """
+        Record a completed routing outcome in the procedural store (§5.4).
+        No-ops when the procedural store is not configured or embedding fails.
+        Called asynchronously after task completion — never on the hot path.
+        """
+        if self.procedural_store is None:
+            return
+        emb = self.embed(query)
+        if emb:
+            self.procedural_store.record(emb, agent_id, success)
+            logger.debug(
+                f"Procedural: recorded {agent_id} {'OK' if success else 'FAIL'} "
+                f"(store size={len(self.procedural_store)})"
+            )
 
     # ── LLM fallback classifier (§4.3) ────────────────────────────────────────
 
@@ -430,7 +553,8 @@ class SemanticRouter:
 # heuristic when the registry is empty (no API key / test environment).
 
 _registry = CapabilityRegistry()
-_semantic_router = SemanticRouter(registry=_registry)
+_procedural_store = ProceduralStore()
+_semantic_router = SemanticRouter(registry=_registry, procedural_store=_procedural_store)
 
 
 def init_registry(embed_fn: Optional[EmbedFn] = None) -> None:
@@ -455,7 +579,9 @@ def init_registry(embed_fn: Optional[EmbedFn] = None) -> None:
 
     try:
         _registry = build_default_registry(embed_fn)
-        _semantic_router = SemanticRouter(registry=_registry)
+        _semantic_router = SemanticRouter(
+            registry=_registry, procedural_store=_procedural_store
+        )
         logger.info("SemanticRouter: registry initialised with embedding model")
     except Exception as exc:
         logger.warning(f"SemanticRouter: registry init failed ({exc}); keyword fallback active")
