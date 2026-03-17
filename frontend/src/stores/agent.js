@@ -19,6 +19,7 @@ export const useAgentStore = defineStore('agent', () => {
     costUsd:      null,
     routing:      '',
     elapsedSeconds: null,
+    dataProfile:  null,   // DataProfile from Phase 1 (Explore Data)
   })
 
   // ── Getters ───────────────────────────────────────────────
@@ -76,6 +77,7 @@ export const useAgentStore = defineStore('agent', () => {
             costUsd:        result.cost_usd,
             routing:        result.routing,
             elapsedSeconds: result.elapsed_seconds,
+            dataProfile:    result.data_profile || null,
           }
         }
       } else {

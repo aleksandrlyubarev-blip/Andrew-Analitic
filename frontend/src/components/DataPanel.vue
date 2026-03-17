@@ -30,7 +30,7 @@
         </div>
       </div>
 
-      <!-- Tabs: Table / Chart / SQL -->
+      <!-- Tabs: Profile / Table / Chart / SQL -->
       <div v-if="hasData" class="panel-tabs">
         <button
           v-for="tab in panelTabs"
@@ -43,6 +43,9 @@
           {{ tab.label }}
           <span v-if="tab.id === 'table' && data.queryResults.length" class="count-badge">
             {{ data.queryResults.length }}
+          </span>
+          <span v-if="tab.id === 'profile' && profileTableCount" class="count-badge profile-badge">
+            {{ profileTableCount }}
           </span>
         </button>
       </div>
@@ -57,6 +60,12 @@
         </div>
 
         <template v-else>
+          <!-- Profile tab (Phase 1: Explore Data) -->
+          <div v-if="activeTab === 'profile'" class="tab-content tab-profile">
+            <DataProfilePanel v-if="data.dataProfile" :profile="data.dataProfile" />
+            <div v-else class="no-results">No data profile available for this query.</div>
+          </div>
+
           <!-- Table tab -->
           <div v-if="activeTab === 'table'" class="tab-content">
             <SqlTable v-if="data.queryResults.length" :rows="data.queryResults" />
@@ -122,6 +131,7 @@ import { ref, computed } from 'vue'
 import { useAgentStore } from '../stores/agent.js'
 import SqlTable from './SqlTable.vue'
 import ChartView from './ChartView.vue'
+import DataProfilePanel from './DataProfilePanel.vue'
 
 const store = useAgentStore()
 const data  = computed(() => store.latestData)
@@ -134,10 +144,15 @@ const hasData = computed(() =>
 const activeTab = ref('table')
 
 const panelTabs = [
-  { id: 'table', icon: '⬛', label: 'Table' },
-  { id: 'chart', icon: '📈', label: 'Chart' },
-  { id: 'sql',   icon: '🗄',  label: 'SQL' },
+  { id: 'profile', icon: '🔍', label: 'Profile' },
+  { id: 'table',   icon: '⬛', label: 'Table' },
+  { id: 'chart',   icon: '📈', label: 'Chart' },
+  { id: 'sql',     icon: '🗄',  label: 'SQL' },
 ]
+
+const profileTableCount = computed(() =>
+  data.value.dataProfile?.tables?.length || 0
+)
 
 const confidenceColor = computed(() => {
   const c = data.value.confidence || 0
@@ -265,6 +280,10 @@ const tips = [
   color: var(--andrew);
   font-weight: 600;
 }
+.profile-badge {
+  background: rgba(0,240,255,0.06);
+  color: var(--text-dim);
+}
 
 /* ── Panel body ────────────────────────────────────────── */
 .panel-body {
@@ -306,6 +325,7 @@ const tips = [
   text-align: center;
 }
 
+.tab-profile { padding: 0; overflow: hidden; }
 .sql-tab { gap: 10px; }
 .sql-label {
   font-size: 11px;

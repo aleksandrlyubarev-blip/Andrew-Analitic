@@ -724,6 +724,7 @@ class AnalyzeResponse(BaseModel):
     session_id: Optional[str] = None
     session_length: int = 0
     memory_records_retrieved: int = 0
+    data_profile: Optional[Dict[str, Any]] = None
 
 
 class EducateRequest(BaseModel):
