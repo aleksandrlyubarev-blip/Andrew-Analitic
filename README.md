@@ -1,12 +1,16 @@
-# Andrew Swarm
+# Andrew & Romeo — AI Analytics Suite
 
-> A data science AI agent with hardened analytics pipelines, budget-aware multi-model routing, and Moltis-powered delivery.
+> Andrew Swarm analyses data. Romeo PhD explains it. One dark-themed UI to rule them both.
 
-**Release: v1.0.0-rc1** — MVP release candidate. Functional, tested internally, not yet battle-tested in production.
+**Release: v1.4.0** — Double Diamond Analytics Workflow (Explore → Hypothesis → Analyse → Validate), rate limiting, adversarial test suite, HITL escalation, semantic routing, memory architecture.
 
 ## What It Does
 
-Andrew Swarm is an analytical AI agent that turns natural language questions into validated SQL queries, Python analyses, and formatted reports. It routes simple BI tasks to cheap models and complex math/ML to reasoning models, enforcing a hard dollar budget per query.
+**Andrew Swarm** is an analytical AI agent that turns natural language questions into validated SQL queries, Python analyses, and formatted reports. It routes simple BI tasks to cheap models and complex math/ML to reasoning models, enforcing a hard dollar budget per query.
+
+**Romeo PhD** is the educational companion agent. Ask it to explain concepts — gradient descent, p-values, random forests, SQL joins — and it returns clear, Markdown-formatted answers with examples and analogies.
+
+The **Vue 3 web UI** (port 8100, served by the bridge) gives both agents a split-view interface: chat on the left, SQL tables + charts on the right.
 
 Moltis (a Rust runtime) provides the delivery layer: messaging channels (Telegram, Discord, Web UI), persistent memory, sandboxed code execution, and cron scheduling.
 
@@ -19,7 +23,7 @@ Moltis (a Rust runtime) provides the delivery layer: messaging channels (Telegra
 | **Docker** | 24.0+ | For Moltis + sandbox. Podman also works. |
 | **Database** | SQLite (default) | PostgreSQL optional for production |
 | **Moltis** | Latest | Auto-installed via Docker. Or: `brew install moltis-org/tap/moltis` |
-| **Hardware** | 2GB RAM, 2 cores | Moltis itself uses <100MB |
+| **Node.js** | 20+ | Only needed for local frontend dev (`npm run dev`) |
 
 **You do NOT need:** xAI/Grok key (optional for math routing), E2B account (Moltis sandbox replaces it), GPU.
 
@@ -47,58 +51,72 @@ cd Andrew-Analitic
 cp .env.example .env
 # Edit .env — set MOLTIS_PASSWORD and at least one LLM API key
 
-# 3. Launch
+# 3. Launch  (builds frontend automatically via multi-stage Dockerfile)
 docker compose up -d
 
-# 4. Test
+# 4. Open the web UI
+open http://localhost:8100
+
+# 5. Or call the API directly
 curl -X POST http://localhost:8100/analyze \
   -H "Content-Type: application/json" \
   -d '{"query": "Total revenue by region"}'
 
-# 5. Open Moltis Web UI
-open http://localhost:13131
+curl -X POST http://localhost:8100/educate \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What is gradient descent?"}'
 ```
 
-### Local (without Docker)
+### Local development
 
 ```bash
 # Terminal 1: Moltis
 brew install moltis-org/tap/moltis
 moltis gateway
 
-# Terminal 2: Andrew bridge
+# Terminal 2: Python bridge
 pip install -r requirements.txt
-python bridge/moltis_bridge.py
+uvicorn bridge.moltis_bridge:app --reload --port 8100
 
-# Terminal 3: Test
-curl -X POST http://localhost:8100/analyze \
-  -H "Content-Type: application/json" \
-  -d '{"query": "Average revenue by month"}'
+# Terminal 3: Frontend dev server (with hot-reload)
+cd frontend
+npm install
+npm run dev        # → http://localhost:3000  (proxies /api → :8100)
+```
+
+To build the frontend and serve it directly from the bridge (no separate dev server):
+
+```bash
+cd frontend && npm run build   # outputs to bridge/static/
+# Now http://localhost:8100 serves the UI
 ```
 
 ## Architecture
 
 ```
-User (Telegram / Discord / Web UI / API)
+User (Browser → http://localhost:8100)
          |
          v
-+-------------------------+
-|   Moltis (Rust, :13131) |  Channels, memory, sandbox, cron
-|   Hook: MessageReceived  |
-+-----------+-------------+
-            | POST /webhook/moltis
++---------------------------+
+|  Vue 3 UI  (bridge/static)|  Chat panel + SQL table + Chart.js charts
++-----------+---------------+
+            | fetch /analyze or /educate
             v
-+-------------------------+
-| Bridge (Python, :8100)  |  FastAPI. Memory recall, query enrichment,
-|                         |  result formatting, memory store.
-+-----------+-------------+
-            | executor.execute()
-            v
-+-------------------------+
-| Andrew Core (LangGraph) |  Weighted router -> SQL gen -> sqlglot qualify
-|                         |  -> execute -> Python gen -> AST safety
-|                         |  -> sandbox -> Pandera -> semantic guardrails
-+-------------------------+
++---------------------------+
+|  Bridge (Python, :8100)   |  FastAPI. Serves UI + API. Memory recall,
+|                           |  query enrichment, result formatting.
++------+------------+-------+
+       |            |
+       v            v
+  Andrew Core   Romeo PhD
+  (LangGraph)   (LiteLLM)
+  SQL → Python  Educational
+  analysis      explanations
+       |
+       v
++---------------------------+
+|   Moltis (Rust, :13131)   |  Channels, memory, sandbox, cron
++---------------------------+
 ```
 
 ## How Routing Works
@@ -111,28 +129,31 @@ Andrew uses weighted keyword scoring (48 terms) to route queries to three model 
 | **analytics_fastlane** | average + monthly, CAGR + region (light math + BI context) | GPT-4o-mini | $ |
 | **standard** | Bar chart, group by, show totals (pure BI) | Claude Sonnet | $$ |
 
-All models are configurable via environment variables. No hardcoded vendor lock-in.
+Romeo PhD always uses `MODEL_ROMEO` (default: `gpt-4o-mini`).
 
 ## Security Posture
 
-This is an MVP. The following guardrails are implemented but not formally audited:
+The following guardrails are implemented and covered by the adversarial test suite (Sprint 6):
 
 - **SQL safety:** sqlglot `qualify(schema=...)` validates every table and column against the real schema. Blocked keywords: DROP, DELETE, TRUNCATE, ALTER, and 13 others. Only SELECT/WITH statements allowed.
 - **Python safety:** AST analysis blocks `import os`, `subprocess`, `exec()`, `eval()`, `open()` before code reaches the sandbox. Data leakage detection flags `fit_transform` before `train_test_split`.
 - **Sandbox isolation:** Moltis runs generated code in per-session Docker containers. No host filesystem access.
 - **Budget guard:** Hard cap at $1.00 per query (configurable). Stops LLM calls when exhausted.
 - **Semantic guardrails:** Checks that SQL output matches user intent (revenue question must reference revenue column, monthly question must have GROUP BY).
+- **Adversarial test suite:** 20 tests covering all 8 threat model cases — hallucinated tables/columns, destructive SQL, intent mismatch, data leakage, dangerous Python, budget exhaustion, prompt injection.
+- **HITL escalation:** Results with confidence below `HITL_CONFIDENCE_THRESHOLD` return HTTP 202 + `hitl_required=true` for human review before acting.
+- **Rate limiting:** Per-IP sliding-window rate limiter on `/analyze` (10 req/min), `/educate` (20 req/min), and `/webhook/moltis` (30 req/min). Returns HTTP 429 + `Retry-After` on excess. Configurable via env vars; no Redis required.
 
-**Also implemented:** HITL gate for low-confidence results (confidence < 0.5 triggers human review via configurable webhook — set `HITL_ENABLED=true`). Rate limiting on all bridge endpoints (10 req/min on `/analyze`, 30 on `/webhook/moltis`, 5 on `/schedule`).
-
-**Not yet implemented:** formal threat model testing, adversarial fuzz suite.
+**Not yet implemented:** formal third-party security audit, distributed rate limiting (current limiter is in-process only — does not coordinate across multiple bridge replicas).
 
 ## API Endpoints
 
 | Method | Path | Description |
 |---|---|---|
+| `GET` | `/` | Web UI (served from `bridge/static/`) |
 | `GET` | `/health` | Health check (Andrew + Moltis) |
-| `POST` | `/analyze` | Submit analytical query |
+| `POST` | `/analyze` | Submit analytical query (Andrew) |
+| `POST` | `/educate` | Ask an educational question (Romeo PhD) |
 | `POST` | `/webhook/moltis` | Moltis hook receiver (filters for analytical intent) |
 | `POST` | `/schedule` | Create recurring analysis (cron) |
 
@@ -142,23 +163,35 @@ This is an MVP. The following guardrails are implemented but not formally audite
 Andrew-Analitic/
   core/
     andrew_swarm.py       # LangGraph analytical engine
-    supervisor.py         # Multi-agent router (Andrew + Romeo + both)
-    romeo_swarm.py        # Romeo PhD educational agent
+    semantic_router.py    # Semantic routing + ProceduralStore
+    memory.py             # ConsolidationEngine, InProcessSemanticStore, staleness sweep
+    romeo_phd.py          # Romeo PhD educational agent
   bridge/
-    moltis_bridge.py      # FastAPI server, Moltis integration, rate limiting
-    hitl.py               # Human-in-the-loop gate (webhook-based review)
+    moltis_bridge.py      # FastAPI bridge: API + rate limiting + memory pipeline
+    static/               # Compiled Vue UI (git-ignored, built by Dockerfile)
+  frontend/               # Vue 3 + Vite source
+    src/
+      App.vue             # Root layout (split view)
+      components/         # Header, AgentTabs, ChatPanel, DataPanel, charts
+      stores/agent.js     # Pinia store (messages, API calls, data panel state)
+      api/index.js        # fetch wrappers for /analyze + /educate
+    vite.config.js        # Dev proxy + build output config
   config/
-    .env.example          # Environment template (also at repo root)
+    .env.example
   tests/
-    test_routing.py       # Routing smoke tests (12)
-    test_validation.py    # SQL + Python safety tests (15)
-    test_supervisor.py    # Multi-agent classification tests (13)
-    test_hitl.py          # HITL gate tests (15)
+    test_routing.py       # 12 routing smoke tests
+    test_validation.py    # 15 validation tests
+    test_adversarial.py   # 20 adversarial tests (8 threat vectors)
+    test_hitl.py          # 13 HITL escalation tests
+    test_semantic_router.py  # 30 semantic router tests
+    test_memory.py        # 28 memory + consolidation tests
+    test_rate_limit.py    # 22 rate-limiter tests
+    test_double_diamond.py  # 25 Double Diamond workflow tests
   docs/
-    ARCHITECTURE.md       # Detailed architecture notes
-    CHANGELOG.md          # Release history
+    ARCHITECTURE.md
+    CHANGELOG.md
   docker-compose.yml
-  Dockerfile
+  Dockerfile              # Multi-stage: Node builds UI, Python serves it
   requirements.txt
   .env.example            # Copy to .env to configure
   README.md
@@ -178,6 +211,7 @@ MODEL_ORCHESTRATOR=anthropic/claude-sonnet-4-20250514
 MODEL_PYTHON=anthropic/claude-sonnet-4-20250514
 MODEL_ANALYTICS=gpt-4o-mini
 MODEL_SQL=gpt-4o-mini
+MODEL_ROMEO=gpt-4o-mini        # Romeo PhD model
 
 # Moltis connection
 MOLTIS_HOST=127.0.0.1
@@ -189,7 +223,13 @@ DATABASE_URL=sqlite:///andrew.db
 
 # Limits
 ANDREW_MAX_COST=1.00
-BRIDGE_PORT=8100
+ROMEO_MAX_TOKENS=2000
+HITL_CONFIDENCE_THRESHOLD=0.35   # results below this trigger HTTP 202 + hitl_required=true
+
+# Rate limiting (N requests per W seconds per IP; set N=0 to disable)
+RATE_LIMIT_ANALYZE=10/60
+RATE_LIMIT_EDUCATE=20/60
+RATE_LIMIT_WEBHOOK=30/60
 ```
 
 ## Roadmap
@@ -197,14 +237,11 @@ BRIDGE_PORT=8100
 - [x] Sprint 1-2: LangGraph pipeline + LiteLLM routing
 - [x] Sprint 3: Hardened validation (sqlglot qualify, AST safety, Pandera)
 - [x] Sprint 4: Weighted 48-keyword routing, model registry, provider adapters
-- [x] Sprint 5: Moltis integration (channels, memory, sandbox, scheduling)
-- [ ] Sprint 6: Adversarial test suite (8 test cases from threat model)
-- [x] Sprint 7: HITL gate — low-confidence results routed for human review
-- [x] Sprint 8: Romeo PhD + shared supervisor (educational + analytical agents)
-
-## Companion Agent
-
-Andrew Swarm is the analytical half of a two-agent system. **Romeo PhD** (`core/romeo_swarm.py`) handles educational queries — explanations, comparisons, derivations, and tutorials. A shared LangGraph supervisor (`core/supervisor.py`) routes every incoming query to Andrew, Romeo, or both based on keyword intent.
+- [x] Sprint 5: Moltis integration + Semantic Router + Memory Architecture (procedural + consolidation + staleness sweep)
+- [x] Sprint 6: Adversarial test suite (20 tests, 8 threat vectors) + Bridge rate limiting (22 tests, HTTP 429, `Retry-After`)
+- [x] Sprint 7: HITL escalation — `hitl_escalate` LangGraph node, HTTP 202, 13 tests
+- [x] Sprint 8: Romeo PhD educational agent + Vue 3 split-view web UI
+- [x] Sprint 9: Double Diamond workflow — `profile_schema` + `hypothesis_gate` nodes, statistical quality gates, 25 tests
 
 ## License
 

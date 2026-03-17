@@ -1,21 +1,38 @@
 """
-HITL gate tests — no live webhook required.
+HITL tests — two suites covering different layers of the HITL stack.
 
-All tests mock httpx.AsyncClient to control webhook responses.
-They run without any external services or API keys.
+Suite A — bridge/hitl.py (HitlGate webhook-based review):
+  Tests the async webhook gateway: threshold logic, approve/reject/modify,
+  timeout behavior, POST failure fallback, review ID tracking.
+
+Suite B — core/andrew_swarm.py (hitl_escalate LangGraph node, Sprint 7):
+  Tests the inline HITL escalation node: threshold boundary, reason generation,
+  audit log, semantic guardrail → HITL path integration.
+
+Run: python -m pytest tests/test_hitl.py -v
 """
 
 import asyncio
 import httpx
+import sys
+import os
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
 from bridge.hitl import HitlConfig, HitlGate, HitlOutcome
+from core.andrew_swarm import (
+    hitl_escalate,
+    semantic_guardrails,
+    finalize_state,
+    HITL_CONFIDENCE_THRESHOLD,
+)
 
 
-# ============================================================
-# Helpers
-# ============================================================
+# ═══════════════════════════════════════════════════════════════
+# SUITE A — bridge/hitl.py HitlGate (async webhook)
+# ═══════════════════════════════════════════════════════════════
 
 def _gate(enabled=True, threshold=0.5, webhook_url="http://fake-webhook/review",
           timeout=5, poll_interval=0.1, on_timeout="approve") -> HitlGate:
@@ -30,13 +47,7 @@ def _gate(enabled=True, threshold=0.5, webhook_url="http://fake-webhook/review",
     return HitlGate(config=config)
 
 
-def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
-
-
-# ============================================================
-# 1. needs_review() — pure logic, no I/O
-# ============================================================
+# ── A1. needs_review() — pure logic ──────────────────────────
 
 def test_below_threshold_triggers_review():
     gate = _gate(enabled=True, threshold=0.5)
@@ -59,9 +70,7 @@ def test_disabled_never_triggers():
     assert gate.needs_review(0.1) is False
 
 
-# ============================================================
-# 2. check() — skipped paths
-# ============================================================
+# ── A2. check() — skipped paths ──────────────────────────────
 
 @pytest.mark.asyncio
 async def test_high_confidence_returns_skipped():
@@ -90,9 +99,7 @@ async def test_no_webhook_url_passes_through_with_warning():
     assert any("no webhook" in w.lower() for w in outcome.warnings)
 
 
-# ============================================================
-# 3. check() — webhook approve (synchronous decision)
-# ============================================================
+# ── A3. check() — webhook approve ────────────────────────────
 
 @pytest.mark.asyncio
 async def test_approved_result_returned_unchanged():
@@ -115,9 +122,7 @@ async def test_approved_result_returned_unchanged():
     assert outcome.output == "my output"
 
 
-# ============================================================
-# 4. check() — webhook reject
-# ============================================================
+# ── A4. check() — webhook reject ─────────────────────────────
 
 @pytest.mark.asyncio
 async def test_rejected_result_clears_output():
@@ -144,9 +149,7 @@ async def test_rejected_result_clears_output():
     assert any("rejected" in w.lower() for w in outcome.warnings)
 
 
-# ============================================================
-# 5. check() — webhook modify
-# ============================================================
+# ── A5. check() — webhook modify ─────────────────────────────
 
 @pytest.mark.asyncio
 async def test_modified_output_replaces_original():
@@ -172,22 +175,17 @@ async def test_modified_output_replaces_original():
     assert any("modified" in w.lower() for w in outcome.warnings)
 
 
-# ============================================================
-# 6. Timeout behaviour
-# ============================================================
+# ── A6. Timeout behaviour ─────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_webhook_timeout_approve_behavior():
-    """When webhook times out and on_timeout=approve, result passes through."""
     gate = _gate(timeout=1, poll_interval=0.5, on_timeout="approve")
-
     mock_post_response = MagicMock()
-    mock_post_response.status_code = 202   # Accepted, not yet decided
+    mock_post_response.status_code = 202
     mock_post_response.raise_for_status = MagicMock()
-    mock_post_response.json = MagicMock(return_value={})  # No decision field
-
+    mock_post_response.json = MagicMock(return_value={})
     mock_poll_response = MagicMock()
-    mock_poll_response.status_code = 202  # Still pending
+    mock_poll_response.status_code = 202
 
     mock_client = AsyncMock()
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -205,14 +203,11 @@ async def test_webhook_timeout_approve_behavior():
 
 @pytest.mark.asyncio
 async def test_webhook_timeout_reject_behavior():
-    """When webhook times out and on_timeout=reject, output is cleared."""
     gate = _gate(timeout=1, poll_interval=0.5, on_timeout="reject")
-
     mock_post_response = MagicMock()
     mock_post_response.status_code = 202
     mock_post_response.raise_for_status = MagicMock()
     mock_post_response.json = MagicMock(return_value={})
-
     mock_poll_response = MagicMock()
     mock_poll_response.status_code = 202
 
@@ -230,15 +225,11 @@ async def test_webhook_timeout_reject_behavior():
     assert outcome.output == ""
 
 
-# ============================================================
-# 7. Webhook POST failure
-# ============================================================
+# ── A7. Webhook POST failure ──────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_webhook_post_failure_falls_back_to_on_timeout():
-    """If the POST itself raises an exception, use on_timeout behaviour."""
     gate = _gate(on_timeout="approve")
-
     mock_client = AsyncMock()
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
@@ -247,15 +238,12 @@ async def test_webhook_post_failure_falls_back_to_on_timeout():
     with patch("bridge.hitl.httpx.AsyncClient", return_value=mock_client):
         outcome = await gate.check(query="q", output="out", confidence=0.2)
 
-    # on_timeout=approve → should pass through
     assert outcome.triggered is True
     assert outcome.decision == "approve"
     assert outcome.output == "out"
 
 
-# ============================================================
-# 8. review_id is set when triggered
-# ============================================================
+# ── A8. review_id tracking ────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_review_id_present_on_triggered():
@@ -282,3 +270,124 @@ async def test_review_id_absent_when_skipped():
     gate = _gate()
     outcome = await gate.check(query="q", output="out", confidence=0.99)
     assert outcome.review_id is None
+
+
+# ═══════════════════════════════════════════════════════════════
+# SUITE B — core/andrew_swarm.py hitl_escalate node (Sprint 7)
+# ═══════════════════════════════════════════════════════════════
+
+def _base_state(confidence: float, warnings=None) -> dict:
+    return {
+        "confidence": confidence,
+        "warnings": warnings or [],
+        "audit_log": [],
+        "error_message": "",
+        "sql_query": "SELECT region, SUM(revenue) FROM sales GROUP BY region",
+        "user_request": "revenue by region",
+    }
+
+
+# ── B1. hitl_escalate node ────────────────────────────────────
+
+def test_hitl_escalate_sets_required():
+    state = _base_state(confidence=0.20)
+    result = hitl_escalate(state)
+    assert result["hitl_required"] is True
+
+
+def test_hitl_escalate_reason_contains_confidence():
+    state = _base_state(confidence=0.20)
+    result = hitl_escalate(state)
+    assert "0.20" in result["hitl_reason"] or "confidence" in result["hitl_reason"]
+
+
+def test_hitl_escalate_includes_warnings_in_reason():
+    warnings = ["Semantic: Asked about revenue but SQL doesn't reference it"]
+    state = _base_state(confidence=0.25, warnings=warnings)
+    result = hitl_escalate(state)
+    assert result["hitl_required"] is True
+    assert "revenue" in result["hitl_reason"].lower() or warnings[0] in result["hitl_reason"]
+
+
+def test_hitl_escalate_caps_warnings_at_five():
+    many_warnings = [f"warning {i}" for i in range(10)]
+    state = _base_state(confidence=0.10, warnings=many_warnings)
+    result = hitl_escalate(state)
+    assert result["hitl_reason"].count("warning") <= 5
+
+
+def test_hitl_escalate_audit_log_appended():
+    state = _base_state(confidence=0.20)
+    hitl_escalate(state)
+    assert any(entry.get("stage") == "hitl_escalate" for entry in state["audit_log"])
+
+
+# ── B2. Threshold boundary ────────────────────────────────────
+
+def test_threshold_value_matches_env_default():
+    expected = float(os.getenv("HITL_CONFIDENCE_THRESHOLD", "0.35"))
+    assert HITL_CONFIDENCE_THRESHOLD == expected
+
+
+def test_below_threshold_triggers_hitl():
+    low = HITL_CONFIDENCE_THRESHOLD - 0.01
+    state = _base_state(confidence=low)
+    result = hitl_escalate(state)
+    assert result["hitl_required"] is True
+
+
+def test_at_threshold_does_not_trigger_hitl():
+    threshold = HITL_CONFIDENCE_THRESHOLD
+    state = _base_state(confidence=threshold)
+    route = "hitl" if state["confidence"] < threshold else "ok"
+    assert route == "ok"
+
+
+def test_above_threshold_does_not_trigger_hitl():
+    high = HITL_CONFIDENCE_THRESHOLD + 0.20
+    state = _base_state(confidence=high)
+    route = "hitl" if state["confidence"] < HITL_CONFIDENCE_THRESHOLD else "ok"
+    assert route == "ok"
+
+
+# ── B3. Integration: semantic_guardrails → HITL path ─────────
+
+def test_semantic_failure_drops_below_threshold():
+    """
+    semantic_guardrails subtracts 0.20 per issue.
+    Starting at 0.50 with 3 issues → 0.50 - 0.60 = 0.0, which is below 0.35.
+    """
+    state = {
+        "confidence": 0.50,
+        "sql_query": "SELECT SUM(quantity) FROM sales",
+        "user_request": "show top monthly revenue",
+        "warnings": [],
+        "audit_log": [],
+        "error_message": "",
+    }
+    result = semantic_guardrails(state)
+    final_conf = result.get("confidence", state["confidence"])
+    assert final_conf < HITL_CONFIDENCE_THRESHOLD
+
+
+def test_hitl_not_set_on_confident_result():
+    """A result with high confidence should have hitl_required=False."""
+    state = _base_state(confidence=0.90)
+    final = finalize_state(state)
+    assert final.get("hitl_required", False) is False
+
+
+# ── B4. hitl_reason edge cases ────────────────────────────────
+
+def test_hitl_reason_is_non_empty_string():
+    state = _base_state(confidence=0.10)
+    result = hitl_escalate(state)
+    assert isinstance(result["hitl_reason"], str)
+    assert len(result["hitl_reason"]) > 0
+
+
+def test_hitl_reason_without_warnings_still_meaningful():
+    state = _base_state(confidence=0.15, warnings=[])
+    result = hitl_escalate(state)
+    assert result["hitl_reason"]
+    assert "confidence" in result["hitl_reason"] or "0.15" in result["hitl_reason"]

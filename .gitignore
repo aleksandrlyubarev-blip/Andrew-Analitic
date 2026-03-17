@@ -22,3 +22,5 @@ andrew-data/
 pg-data/
 .DS_Store
 node_modules/
+frontend/dist/
+bridge/static/
