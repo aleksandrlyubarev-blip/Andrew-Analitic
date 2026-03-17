@@ -1,8 +1,21 @@
 # Andrew & Romeo — AI Analytics Suite
 
-> Andrew Swarm analyses data. Romeo PhD explains it. One dark-themed UI to rule them both.
+> **"60 % of enterprise dashboards are abandoned. Andrew turns natural language
+> into validated, actionable analytics in seconds — without a single line of SQL
+> from the business user."**
 
-**Release: v1.4.0** — Double Diamond Analytics Workflow (Explore → Hypothesis → Analyse → Validate), rate limiting, adversarial test suite, HITL escalation, semantic routing, memory architecture.
+**Release: v1.4.0** · 166 tests passing · Double Diamond workflow · Python 3.11/3.12 · MIT
+
+```bash
+# One command to a working demo
+python demo/seed_demo_db.py && DATABASE_URL=sqlite:///demo/demo.db docker compose up -d
+# Then: open http://localhost:8100
+# Then: bash demo/demo_queries.sh    ← 8 live queries + metrics
+```
+
+→ **[Full investor brief: docs/PITCH.md](docs/PITCH.md)**
+
+---
 
 ## What It Does
 
@@ -151,11 +164,16 @@ The following guardrails are implemented and covered by the adversarial test sui
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/` | Web UI (served from `bridge/static/`) |
-| `GET` | `/health` | Health check (Andrew + Moltis) |
+| `GET` | `/health` | Health check (Andrew + Moltis + memory state) |
+| `GET` | `/metrics` | Operational metrics: queries, cost, confidence, routing |
+| `GET` | `/docs` | Interactive OpenAPI / Swagger UI |
 | `POST` | `/analyze` | Submit analytical query (Andrew) |
 | `POST` | `/educate` | Ask an educational question (Romeo PhD) |
 | `POST` | `/webhook/moltis` | Moltis hook receiver (filters for analytical intent) |
 | `POST` | `/schedule` | Create recurring analysis (cron) |
+| `GET` | `/schedule` | List scheduled jobs |
+| `GET` | `/results/{hash}` | Retrieve stored result by SHA-256 hash |
+| `POST` | `/session/{id}/end` | End session + trigger memory consolidation |
 
 ## Project Structure
 
@@ -241,6 +259,12 @@ RATE_LIMIT_WEBHOOK=30/60
 - [x] Sprint 7: HITL escalation — `hitl_escalate` LangGraph node, HTTP 202, 13 tests
 - [x] Sprint 8: Romeo PhD educational agent + Vue 3 split-view web UI
 - [x] Sprint 9: Double Diamond workflow — `profile_schema` + `hypothesis_gate` nodes, statistical quality gates, 25 tests
+- [ ] Sprint 10: OpenAPI / MCP server — let Claude Code, Cursor, other AI tools call Andrew directly
+- [ ] Sprint 11: Streaming responses (Server-Sent Events) — real-time token-by-token output
+- [ ] Sprint 12: Multi-tenant auth — JWT / API-key per workspace, RLS passthrough to DB
+- [ ] Sprint 13: Distributed rate limiting — Redis-backed limiter for multi-replica deployments
+- [ ] Sprint 14: Vector store integration — Qdrant / Weaviate for semantic search over past analyses
+- [ ] Sprint 15: Dashboard export — PDF / PPTX one-click export of chart + narrative
 
 ## License
 
