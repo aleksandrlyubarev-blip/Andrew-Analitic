@@ -28,7 +28,6 @@ The bridge runs as a FastAPI service that:
 """
 
 import asyncio
-import collections
 import hashlib
 import json
 import logging
@@ -36,7 +35,8 @@ import os
 import threading
 import time
 from collections import defaultdict, deque
-from dataclasses import dataclass, field
+from contextlib import asynccontextmanager
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -113,6 +113,14 @@ class SlidingWindowRateLimiter:
             window.append(now)
             return True, 0
 
+    def _prune(self) -> None:
+        """Remove keys whose entire window has expired. Prevents unbounded dict growth."""
+        cutoff = time.time() - self.window_seconds
+        with self._lock:
+            stale = [k for k, v in self._windows.items() if not v or v[-1] <= cutoff]
+            for k in stale:
+                del self._windows[k]
+
     def reset(self, key: str) -> None:
         """Clear all recorded timestamps for a key (test helper)."""
         with self._lock:
@@ -172,8 +180,12 @@ SEMANTIC_RELEVANCE_THRESHOLD = float(os.getenv("SEMANTIC_RELEVANCE_THRESHOLD", "
 EPISODIC_MAX_ENTRIES = int(os.getenv("EPISODIC_MAX_ENTRIES", "20"))
 
 # Shared memory + router singletons (Sprint 5 §5.4)
-from core.memory import _semantic_store, _consolidation_engine  # noqa: E402
-from core.semantic_router import _semantic_router                # noqa: E402
+from core.memory import _semantic_store, _consolidation_engine, SweepResult  # noqa: E402
+from core.semantic_router import _semantic_router                              # noqa: E402
+
+# ── Bridge uptime + last sweep tracking ───────────────────────────────────────
+_bridge_start_time: float = 0.0
+_last_sweep: Optional[SweepResult] = None
 
 
 # ============================================================
@@ -620,10 +632,42 @@ class AndrewMoltisBridge:
 # FastAPI Webhook Server
 # ============================================================
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage startup and shutdown for the bridge."""
+    global _bridge_start_time, _last_sweep, _bridge
+    _bridge_start_time = time.time()
+    interval = int(os.getenv("STALENESS_SWEEP_INTERVAL_S", str(24 * 3600)))
+
+    async def _sweep_loop():
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                _last_sweep = await asyncio.to_thread(_consolidation_engine.staleness_sweep)
+                logger.info(f"Daily staleness sweep: {_last_sweep}")
+                for lim in (_limiter_analyze, _limiter_educate, _limiter_webhook):
+                    lim._prune()
+            except Exception as exc:
+                logger.warning(f"Staleness sweep failed: {exc}")
+
+    sweep_task = asyncio.create_task(_sweep_loop())
+    try:
+        yield
+    finally:
+        sweep_task.cancel()
+        try:
+            await sweep_task
+        except asyncio.CancelledError:
+            pass
+        if _bridge:
+            await _bridge.close()
+
+
 app = FastAPI(
     title="Andrew Swarm — Moltis Bridge",
-    version="1.0.0-rc1",
+    version="1.3.0",
     description="Connects Andrew's analytical brain to Moltis's Rust runtime",
+    lifespan=lifespan,
 )
 
 # Serve the compiled Vue frontend from bridge/static/ (built by `npm run build`)
@@ -708,19 +752,39 @@ class HealthResponse(BaseModel):
     andrew: str
     moltis: Dict[str, Any]
     bridge: str
+    uptime_seconds: float
+    semantic_store_records: int
+    procedural_store_records: int
+    active_sessions: int
+    rate_limits: Dict[str, Any]
+    last_sweep: Optional[Dict[str, Any]]
 
 
 # ─── Endpoints ──────────────────────────────────────────────
 
 @app.get("/health", response_model=HealthResponse)
 async def health():
-    """Health check for both Andrew and Moltis."""
+    """Health check — Andrew, Moltis, and bridge internal state."""
     bridge = get_bridge()
     moltis_health = await bridge.moltis.health_check()
+    proc_store = _semantic_router.procedural_store
     return HealthResponse(
         andrew="ok",
         moltis=moltis_health,
         bridge="ok",
+        uptime_seconds=round(time.time() - _bridge_start_time, 1),
+        semantic_store_records=len(_semantic_store),
+        procedural_store_records=len(proc_store) if proc_store else 0,
+        active_sessions=len(_episodic_store),
+        rate_limits={
+            name: {"max": lim.max_requests, "window_s": lim.window_seconds}
+            for name, lim in (
+                ("analyze", _limiter_analyze),
+                ("educate", _limiter_educate),
+                ("webhook", _limiter_webhook),
+            )
+        },
+        last_sweep=asdict(_last_sweep) if _last_sweep else None,
     )
 
 
@@ -827,22 +891,6 @@ async def schedule_analysis(req: ScheduleRequest):
     raise HTTPException(status_code=500, detail="Failed to create cron job in Moltis")
 
 
-@app.on_event("startup")
-async def startup():
-    """Schedule the daily staleness sweep background task."""
-    async def _sweep_loop():
-        SWEEP_INTERVAL_S = int(os.getenv("STALENESS_SWEEP_INTERVAL_S", str(24 * 3600)))
-        while True:
-            await asyncio.sleep(SWEEP_INTERVAL_S)
-            try:
-                result = await asyncio.to_thread(_consolidation_engine.staleness_sweep)
-                logger.info(f"Daily staleness sweep: {result}")
-            except Exception as exc:
-                logger.warning(f"Staleness sweep failed: {exc}")
-
-    asyncio.create_task(_sweep_loop())
-
-
 @app.post("/session/{session_id}/end")
 async def end_session(session_id: str):
     """
@@ -852,13 +900,6 @@ async def end_session(session_id: str):
     bridge = get_bridge()
     record_id = await bridge.end_session(session_id)
     return {"session_id": session_id, "consolidated_record": record_id}
-
-
-@app.on_event("shutdown")
-async def shutdown():
-    global _bridge
-    if _bridge:
-        await _bridge.close()
 
 
 # ============================================================
