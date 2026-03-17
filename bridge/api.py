@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import sys
+from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, HTTPException, Request
@@ -31,16 +32,6 @@ logger = logging.getLogger("bridge_api")
 
 limiter = Limiter(key_func=get_remote_address)
 
-# ── FastAPI app ──────────────────────────────────────────────
-
-app = FastAPI(
-    title="Andrew Swarm — Moltis Bridge",
-    version="1.0.0-rc1",
-    description="Connects Andrew's analytical brain to Moltis's Rust runtime",
-)
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-
 # ── Singleton bridge instance ────────────────────────────────
 
 _bridge: Optional[AndrewMoltisBridge] = None
@@ -51,6 +42,28 @@ def get_bridge() -> AndrewMoltisBridge:
     if _bridge is None:
         _bridge = AndrewMoltisBridge()
     return _bridge
+
+
+# ── Lifespan ─────────────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    global _bridge
+    if _bridge:
+        await _bridge.close()
+
+
+# ── FastAPI app ──────────────────────────────────────────────
+
+app = FastAPI(
+    title="Andrew Swarm — Moltis Bridge",
+    version="1.0.0-rc1",
+    description="Connects Andrew's analytical brain to Moltis's Rust runtime",
+    lifespan=lifespan,
+)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
 # ── Endpoints ────────────────────────────────────────────────
@@ -134,13 +147,6 @@ async def schedule_analysis(request: Request, req: ScheduleRequest):
     if success:
         return {"status": "scheduled", "schedule": req.cron_schedule, "query": req.query}
     raise HTTPException(status_code=500, detail="Failed to create cron job in Moltis")
-
-
-@app.on_event("shutdown")
-async def shutdown():
-    global _bridge
-    if _bridge:
-        await _bridge.close()
 
 
 # ── Deployment utilities ─────────────────────────────────────
