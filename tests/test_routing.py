@@ -20,10 +20,10 @@ def test_arima_routes_to_reasoning():
     assert r["routing_score"] >= 4
 
 
-def test_bar_chart_routes_to_standard():
+def test_bar_chart_routes_to_fastlane():
+    # "bar chart" is a fastlane keyword — simple visualisation, not complex SQL
     r = _route("Show total revenue by region as a bar chart")
-    assert r["routing_decision"] == "standard"
-    assert r["routing_score"] == 0
+    assert r["routing_decision"] == "analytics_fastlane"
 
 
 def test_monte_carlo_routes_to_reasoning():
@@ -42,9 +42,10 @@ def test_neural_network_routes_to_reasoning():
     assert r["routing_decision"] == "reasoning_math"
 
 
-def test_pie_chart_routes_to_standard():
+def test_pie_chart_routes_to_fastlane():
+    # "pie chart" and "simple" are fastlane keywords
     r = _route("Create a simple pie chart of market share")
-    assert r["routing_decision"] == "standard"
+    assert r["routing_decision"] == "analytics_fastlane"
 
 
 def test_regression_routes_to_reasoning():
@@ -54,13 +55,13 @@ def test_regression_routes_to_reasoning():
 
 def test_cagr_with_analytics_context():
     r = _route("Calculate CAGR and break-even point for product lines")
-    assert r["routing_decision"] in ("analytics_fastlane", "reasoning_math", "standard")
+    assert r["routing_decision"] in ("analytics_fastlane", "reasoning_math", "standard_analytics")
     assert r["routing_score"] >= 2
 
 
 def test_group_by_routes_to_standard():
     r = _route("Group sales by region and show percentages")
-    assert r["routing_decision"] == "standard"
+    assert r["routing_decision"] == "standard_analytics"
 
 
 def test_linear_programming_routes_to_reasoning():
@@ -80,5 +81,5 @@ def test_routing_returns_all_fields():
 
 def test_empty_query_routes_to_standard():
     r = _route("")
-    assert r["routing_decision"] == "standard"
+    assert r["routing_decision"] == "standard_analytics"
     assert r["routing_score"] == 0

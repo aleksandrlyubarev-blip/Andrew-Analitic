@@ -79,6 +79,17 @@ class AndrewState(TypedDict, total=False):
     cost_usd: float
     state_hash: str
 
+    # HITL escalation
+    hitl_required: bool
+    hitl_reason: str
+
+    # Semantic routing (Sprint 5)
+    routing_log: Dict[str, Any]
+    session_id: str
+    session_summary: str
+    session_length: int
+    memory_records_retrieved: int
+
 
 class AndrewResult:
     """Structured output for ROMA bridge and human consumption."""
@@ -96,7 +107,10 @@ class AndrewResult:
         self.audit_log = state.get("audit_log", [])
         self.state_hash = state.get("state_hash", "")
         self.routing = state.get("routing_decision", "")
+        self.routing_log = state.get("routing_log", {})
         self.model_used = state.get("python_model", "")
+        self.hitl_required = state.get("hitl_required", False)
+        self.hitl_reason = state.get("hitl_reason", "")
 
     @property
     def success(self) -> bool:
@@ -215,37 +229,52 @@ def _match_keywords(request: str) -> List[Tuple[str, int]]:
 
 def route_query_intent(state: AndrewState) -> Dict[str, Any]:
     """
-    Score-based routing to 3 lanes:
-    - reasoning_math: heavy ML, score >= 4, or known heavy terms
-    - analytics_fastlane: light math + analytics context
-    - standard: everything else (BI, charts, simple queries)
+    Semantic routing (Sprint 5 §4) — embedding-based cosine similarity against
+    the Capability Registry.  Falls back to keyword scoring when embeddings are
+    unavailable (no API key, test environment, etc.).
+
+    Routing lanes:
+      reasoning_math      — heavy ML / forecasting / simulation
+      standard_analytics  — SQL, cohorts, BI reports
+      analytics_fastlane  — simple aggregations, quick charts
     """
+    from core.semantic_router import _semantic_router  # lazy import avoids circular
+
     request = _normalize(state.get("user_request", state.get("goal", "")))
+
+    routing_log = _semantic_router.route(
+        query=request,
+        session_summary=state.get("session_summary"),
+        session_length=state.get("session_length", 0),
+        memory_records_retrieved=state.get("memory_records_retrieved", 0),
+    )
+    route = routing_log.selected_agent
+
+    # Map registry agent_id → model registry key
+    _model_map = {
+        "reasoning_math":     MODEL_REGISTRY["reasoning_math"],
+        "standard_analytics": MODEL_REGISTRY["default_python"],
+        "analytics_fastlane": MODEL_REGISTRY["analytics_fastlane"],
+    }
+    model = _model_map.get(route, MODEL_REGISTRY["default_python"])
+
+    # Keep legacy keyword fields for backward compatibility
     hits = _match_keywords(request)
-    score = sum(w for _, w in hits)
-
-    has_light = any(t in request for t in LIGHT_ANALYTICS_TERMS)
-    has_heavy = any(t in request for t in HEAVY_ML_TERMS)
-
-    if has_heavy or score >= 4:
-        model = MODEL_REGISTRY["reasoning_math"]
-        route = "reasoning_math"
-    elif hits and has_light:
-        model = MODEL_REGISTRY["analytics_fastlane"]
-        route = "analytics_fastlane"
-    else:
-        model = MODEL_REGISTRY["default_python"]
-        route = "standard"
-
     matched_terms = [kw for kw, _ in hits]
-    logger.info(f"Route: {route} (score={score}, hits={matched_terms}) → {model}")
+    keyword_score = sum(w for _, w in hits)
+
+    logger.info(
+        f"Route: {route} (semantic_score={routing_log.top_score:.3f}, "
+        f"fallback={routing_log.fallback_used}) → {model}"
+    )
 
     return {
         "python_model": model,
         "orchestrator_model": MODEL_REGISTRY["default_orchestrator"],
         "routing_decision": route,
-        "routing_score": score,
+        "routing_score": keyword_score,
         "routing_hits": matched_terms,
+        "routing_log": routing_log.as_dict(),
     }
 
 
@@ -262,6 +291,7 @@ sandbox_retry = RetryPolicy(max_attempts=2, initial_interval=3.0, backoff_factor
 # ============================================================
 
 MAX_COST_USD = float(os.getenv("ANDREW_MAX_COST", "1.00"))
+HITL_CONFIDENCE_THRESHOLD = float(os.getenv("HITL_CONFIDENCE_THRESHOLD", "0.35"))
 
 BLOCKED_SQL_KEYWORDS = {
     "DROP", "DELETE", "TRUNCATE", "ALTER", "GRANT", "REVOKE",
@@ -752,6 +782,33 @@ def semantic_guardrails(state: AndrewState) -> Dict[str, Any]:
 # 16. NODE: Finalize
 # ============================================================
 
+def hitl_escalate(state: AndrewState) -> Dict[str, Any]:
+    """
+    Human-in-the-Loop escalation node.
+
+    Fires when confidence drops below HITL_CONFIDENCE_THRESHOLD after all
+    validation stages.  Marks the result as requiring human review and
+    summarises the reasons so downstream systems (bridge, Moltis channel,
+    UI) can surface a clear message to an operator.
+    """
+    confidence = state.get("confidence", 0.0)
+    warnings = state.get("warnings", [])
+
+    reasons: List[str] = []
+    if confidence < HITL_CONFIDENCE_THRESHOLD:
+        reasons.append(f"confidence {confidence:.2f} < threshold {HITL_CONFIDENCE_THRESHOLD:.2f}")
+    if warnings:
+        reasons.extend(warnings[:5])  # cap to keep the message readable
+
+    reason_str = "; ".join(reasons) if reasons else "low confidence"
+    _audit(state, "hitl_escalate", {"confidence": confidence, "reasons": reasons})
+    logger.warning(f"HITL escalation triggered: {reason_str}")
+    return {
+        "hitl_required": True,
+        "hitl_reason": reason_str,
+    }
+
+
 def finalize_state(state: AndrewState) -> Dict[str, Any]:
     blob = json.dumps({
         "user_request": state.get("user_request", state.get("goal")),
@@ -788,6 +845,7 @@ workflow.add_node("validate_python_static", validate_python_static)
 workflow.add_node("sandbox_execute", sandbox_execute, retry_policy=sandbox_retry)
 workflow.add_node("validate_results", validate_results)
 workflow.add_node("semantic_guardrails", semantic_guardrails)
+workflow.add_node("hitl_escalate", hitl_escalate)
 workflow.add_node("finalize_state", finalize_state)
 
 workflow.add_edge(START, "route_query_intent")
@@ -811,7 +869,12 @@ workflow.add_conditional_edges("sandbox_execute", route_on_error, {
 })
 
 workflow.add_edge("validate_results", "semantic_guardrails")
-workflow.add_edge("semantic_guardrails", "finalize_state")
+workflow.add_conditional_edges(
+    "semantic_guardrails",
+    lambda s: "hitl" if s.get("confidence", 1.0) < HITL_CONFIDENCE_THRESHOLD else "ok",
+    {"hitl": "hitl_escalate", "ok": "finalize_state"},
+)
+workflow.add_edge("hitl_escalate", "finalize_state")
 workflow.add_edge("finalize_state", END)
 
 langgraph_executor = workflow.compile()
@@ -825,6 +888,14 @@ class AndrewExecutor:
     def __init__(self, db_url: Optional[str] = None):
         self.db_url = db_url or os.getenv("DATABASE_URL", "")
         self._schema: Optional[Dict] = None
+        # Initialise Capability Registry embeddings (Sprint 5 §3).
+        # No-ops silently when the embedding API is unavailable; keyword
+        # fallback in SemanticRouter stays active in that case.
+        try:
+            from core.semantic_router import init_registry
+            init_registry()
+        except Exception as _exc:
+            logger.debug(f"Semantic registry init skipped: {_exc}")
 
     @property
     def schema(self) -> Dict[str, Dict[str, str]]:

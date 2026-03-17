@@ -11,10 +11,11 @@ Moltis provides the "hands":
   - GraphQL API: /graphql with subscriptions
 
 Andrew provides the "brain":
-  - Weighted query routing (48 keywords, 3 lanes)
+  - Semantic routing (embedding cosine scoring, Capability Registry, Sprint 5)
   - SQL generation + sqlglot qualify validation
   - Python code generation + AST safety checks
   - Deterministic result validation + semantic guardrails
+  - HITL escalation for low-confidence results (Sprint 7)
 
 Integration pattern:
   Moltis (Rust) ←→ MoltisBridge (Python, this file) ←→ Andrew Swarm v4 (LangGraph)
@@ -27,14 +28,17 @@ The bridge runs as a FastAPI service that:
 """
 
 import asyncio
+import collections
 import hashlib
 import json
 import logging
 import os
+import threading
 import time
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -44,6 +48,132 @@ from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO, format="%(name)s | %(levelname)s | %(message)s")
 logger = logging.getLogger("moltis_bridge")
+
+
+# ============================================================
+# Rate Limiting (Sprint 6 security hardening)
+# ============================================================
+# Per-IP sliding-window rate limiter.  Fully in-process — no Redis needed.
+# Configure via env vars:
+#   RATE_LIMIT_ANALYZE   default "10/60"   → 10 requests per 60 s per IP
+#   RATE_LIMIT_EDUCATE   default "20/60"   → 20 requests per 60 s per IP
+#   RATE_LIMIT_WEBHOOK   default "30/60"   → 30 requests per 60 s per IP
+# Set to "0/60" to disable a limiter entirely.
+
+
+def _parse_rate_spec(spec: str, default_req: int, default_win: int) -> Tuple[int, int]:
+    """Parse 'N/W' into (max_requests, window_seconds). Returns defaults on error."""
+    try:
+        req_str, win_str = spec.split("/", 1)
+        return int(req_str), int(win_str)
+    except Exception:
+        return default_req, default_win
+
+
+class SlidingWindowRateLimiter:
+    """
+    Thread-safe per-key sliding-window rate limiter.
+
+    Each key (typically a client IP) gets an independent window.
+    is_allowed() is O(k) where k is the number of requests in the window —
+    typically very small.
+    """
+
+    def __init__(self, max_requests: int, window_seconds: int) -> None:
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self._windows: Dict[str, deque] = defaultdict(deque)
+        self._lock = threading.Lock()
+
+    def is_allowed(self, key: str) -> Tuple[bool, int]:
+        """
+        Check whether the key may make another request right now.
+
+        Returns:
+            (True, 0)           — request allowed
+            (False, retry_after) — denied; caller should wait retry_after seconds
+        """
+        if self.max_requests == 0:
+            return True, 0                  # limiter disabled
+
+        now = time.time()
+        cutoff = now - self.window_seconds
+
+        with self._lock:
+            window = self._windows[key]
+            # Evict timestamps older than the window
+            while window and window[0] <= cutoff:
+                window.popleft()
+
+            if len(window) >= self.max_requests:
+                # How many seconds until the oldest slot expires
+                retry_after = max(1, int(window[0] - cutoff) + 1)
+                return False, retry_after
+
+            window.append(now)
+            return True, 0
+
+    def reset(self, key: str) -> None:
+        """Clear all recorded timestamps for a key (test helper)."""
+        with self._lock:
+            self._windows.pop(key, None)
+
+    def __repr__(self) -> str:
+        return (
+            f"SlidingWindowRateLimiter(max={self.max_requests}, "
+            f"window={self.window_seconds}s)"
+        )
+
+
+def _build_limiter(env_var: str, default_req: int, default_win: int) -> SlidingWindowRateLimiter:
+    spec = os.getenv(env_var, f"{default_req}/{default_win}")
+    req, win = _parse_rate_spec(spec, default_req, default_win)
+    limiter = SlidingWindowRateLimiter(req, win)
+    logger.info(f"RateLimit {env_var}: {limiter}")
+    return limiter
+
+
+# Module-level limiter instances (one per rate-limited endpoint)
+_limiter_analyze = _build_limiter("RATE_LIMIT_ANALYZE", 10, 60)
+_limiter_educate = _build_limiter("RATE_LIMIT_EDUCATE", 20, 60)
+_limiter_webhook = _build_limiter("RATE_LIMIT_WEBHOOK", 30, 60)
+
+
+def _client_ip(request: Request) -> str:
+    """Extract the real client IP, honoring X-Forwarded-For from reverse proxies."""
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    if request.client:
+        return request.client.host
+    return "unknown"
+
+
+def _check_rate_limit(limiter: SlidingWindowRateLimiter, request: Request) -> None:
+    """Raise HTTP 429 if the client has exceeded its rate limit."""
+    ip = _client_ip(request)
+    allowed, retry_after = limiter.is_allowed(ip)
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded. Retry after {retry_after}s.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+
+# ============================================================
+# Episodic Memory Store (Sprint 5 §5.1)
+# ============================================================
+# Session-scoped in-process store: {session_id -> [{"role", "content", "ts"}]}
+# Cleared on process restart; a durable store (Redis / Moltis) can replace this.
+
+_episodic_store: Dict[str, List[Dict[str, Any]]] = {}
+SEMANTIC_RELEVANCE_THRESHOLD = float(os.getenv("SEMANTIC_RELEVANCE_THRESHOLD", "0.65"))
+EPISODIC_MAX_ENTRIES = int(os.getenv("EPISODIC_MAX_ENTRIES", "20"))
+
+# Shared memory + router singletons (Sprint 5 §5.4)
+from core.memory import _semantic_store, _consolidation_engine  # noqa: E402
+from core.semantic_router import _semantic_router                # noqa: E402
 
 
 # ============================================================
@@ -297,75 +427,147 @@ class AndrewMoltisBridge:
         """
         context = context or {}
         start_time = time.time()
-        logger.info(f"Bridge received: {query[:80]}...")
+        session_id = context.get("session_id") or "default"
+        logger.info(f"Bridge received: {query[:80]}... [session={session_id}]")
 
-        # 1. Check for relevant past analyses in Moltis memory
+        # ── 1. Episodic memory (§5.1) — session-scoped facts ─────────────────
+        episodic = _episodic_store.setdefault(session_id, [])
+        episodic.append({"role": "user", "content": query, "ts": time.time()})
+        # Trim to max window
+        if len(episodic) > EPISODIC_MAX_ENTRIES:
+            _episodic_store[session_id] = episodic[-EPISODIC_MAX_ENTRIES:]
+            episodic = _episodic_store[session_id]
+
+        episodic_context = ""
+        if len(episodic) > 1:
+            episodic_context = "\n".join(
+                f"[{e['role']}] {e['content'][:200]}" for e in episodic[:-1]
+            )
+
+        # Session summary for semantic router δ term (last N=10 turns joined)
+        session_summary = " | ".join(e["content"][:80] for e in episodic[-10:]) or None
+
+        # ── 2. Semantic memory (§5.2) — persistent knowledge, 0.65 threshold ─
+        semantic_memories: List[Dict] = []
         memory_context = ""
         if self.store_results:
             try:
-                memories = await self.moltis.recall_memory(query, limit=3)
-                if memories:
+                raw_memories = await self.moltis.recall_memory(query, limit=5)
+                # Apply §5.3 relevance threshold
+                semantic_memories = [
+                    m for m in (raw_memories or [])
+                    if m.get("score", 0.0) >= SEMANTIC_RELEVANCE_THRESHOLD
+                ]
+                if semantic_memories:
                     memory_context = "\n".join(
-                        f"- Prior analysis (relevance {m.get('score', 0):.2f}): {m.get('content', '')[:200]}"
-                        for m in memories
+                        f"- Prior analysis (relevance {m['score']:.2f}): {m.get('content', '')[:200]}"
+                        for m in semantic_memories
                     )
-                    logger.info(f"Found {len(memories)} relevant memories")
+                    logger.info(
+                        f"Semantic memory: {len(semantic_memories)}/{len(raw_memories or [])} "
+                        f"records above threshold {SEMANTIC_RELEVANCE_THRESHOLD}"
+                    )
             except Exception as e:
                 logger.warning(f"Memory recall failed (non-fatal): {e}")
 
-        # 2. Run Andrew's LangGraph pipeline
-        executor = self._get_executor()
-
-        # Enrich query with memory context if available
+        # ── 3. Context assembly (§6 step 3) ──────────────────────────────────
         enriched_query = query
+        context_parts = []
+        if episodic_context:
+            context_parts.append(f"[Session history:\n{episodic_context}]")
         if memory_context:
-            enriched_query = f"{query}\n\n[Context from prior analyses:\n{memory_context}]"
+            context_parts.append(f"[Long-term context:\n{memory_context}]")
+        if context_parts:
+            enriched_query = query + "\n\n" + "\n".join(context_parts)
 
-        # Andrew's execute() is synchronous — run in thread pool
+        # ── 4. Run Andrew's LangGraph pipeline ───────────────────────────────
+        executor = self._get_executor()
         result = await asyncio.to_thread(executor.execute, enriched_query)
         elapsed = time.time() - start_time
 
-        # 3. Build structured response
+        # ── 5. Write result to episodic memory (§6 step 6a) ──────────────────
+        output_snippet = (result.output or result.error or "")[:300]
+        episodic.append({"role": "assistant", "content": output_snippet, "ts": time.time()})
+
+        # ── 6. Build structured response ──────────────────────────────────────
         response = {
             "query": query,
-            "narrative": result.output if hasattr(result, 'output') else str(result.raw_data or ""),
+            "narrative": result.output if hasattr(result, "output") else str(result.raw_data or ""),
             "sql_query": result.sql_query,
-            "query_results": getattr(result, 'query_results', []) or [],
+            "query_results": getattr(result, "query_results", []) or [],
             "confidence": result.confidence,
-            "cost_usd": result.cost_usd if hasattr(result, 'cost_usd') else result.cost,
-            "warnings": result.warnings if hasattr(result, 'warnings') else [],
+            "cost_usd": result.cost_usd if hasattr(result, "cost_usd") else result.cost,
+            "warnings": result.warnings if hasattr(result, "warnings") else [],
             "success": result.success,
-            "error": result.error_message if hasattr(result, 'error_message') else result.error,
+            "error": result.error_message if hasattr(result, "error_message") else result.error,
             "elapsed_seconds": round(elapsed, 2),
-            "routing": getattr(result, 'routing', 'unknown'),
-            "model_used": getattr(result, 'model_used', 'unknown'),
+            "routing": getattr(result, "routing", "unknown"),
+            "model_used": getattr(result, "model_used", "unknown"),
             "channel": context.get("channel", "api"),
+            "hitl_required": getattr(result, "hitl_required", False),
+            "hitl_reason": getattr(result, "hitl_reason", None),
+            "session_id": session_id,
+            "session_length": len(episodic),
+            "memory_records_retrieved": len(semantic_memories),
         }
 
-        # 4. Format for Moltis channel delivery
+        # ── 7. Format for Moltis channel delivery ─────────────────────────────
         response["formatted_message"] = self._format_for_channel(response)
 
-        # 5. Store in Moltis memory for future context
+        # ── 8. Procedural feedback (§5.4 post-execution) ─────────────────────
+        # Fire-and-forget: does not block the response path.
+        routing_decision = result.routing or "standard_analytics"
+        asyncio.create_task(
+            asyncio.to_thread(
+                _semantic_router.record_outcome, query, routing_decision, result.success
+            )
+        )
+
+        # ── 9. Store in semantic memory (§5.4, §6 step 6b) ───────────────────
         if self.store_results and result.success:
+            mem_content = f"Query: {query}\nResult: {response['narrative'][:500]}"
+            mem_meta = {
+                "confidence": response["confidence"],
+                "sql": result.sql_query,
+                "timestamp": time.time(),
+                "cost": response["cost_usd"],
+                "session_id": session_id,
+            }
             try:
-                await self.moltis.store_memory(
-                    content=f"Query: {query}\nResult: {response['narrative'][:500]}",
-                    metadata={
-                        "confidence": response["confidence"],
-                        "sql": result.sql_query,
-                        "timestamp": time.time(),
-                        "cost": response["cost_usd"],
-                    },
-                )
-                logger.info("Analysis stored in Moltis memory")
+                await self.moltis.store_memory(content=mem_content, metadata=mem_meta)
+                logger.info("Analysis stored in Moltis semantic memory")
             except Exception as e:
-                logger.warning(f"Memory store failed (non-fatal): {e}")
+                logger.warning(f"Moltis memory store failed (non-fatal): {e}")
+            # Mirror into in-process store for consolidation + staleness tracking
+            emb = await asyncio.to_thread(_semantic_router.embed, query)
+            if emb:
+                _semantic_store.upsert(mem_content, emb, metadata=mem_meta)
 
         logger.info(
             f"Bridge completed: confidence={response['confidence']:.2f}, "
-            f"cost=${response['cost_usd']:.4f}, elapsed={elapsed:.1f}s"
+            f"cost=${response['cost_usd']:.4f}, elapsed={elapsed:.1f}s, "
+            f"session_len={response['session_length']}, "
+            f"semantic_memories={response['memory_records_retrieved']}"
         )
         return response
+
+    async def end_session(self, session_id: str) -> Optional[str]:
+        """
+        Explicitly close a session: consolidate episodic memory into the
+        semantic store (§5.4 "End of session").
+
+        Returns the record_id of the stored/merged semantic record, or None.
+        Called by the /end_session API endpoint or a channel disconnect hook.
+        """
+        episodic = _episodic_store.pop(session_id, [])
+        if not episodic:
+            logger.debug(f"end_session: nothing to consolidate for {session_id}")
+            return None
+        record_id = await asyncio.to_thread(
+            _consolidation_engine.consolidate_session, session_id, episodic
+        )
+        logger.info(f"end_session: consolidated {len(episodic)} entries → {record_id}")
+        return record_id
 
     def _format_for_channel(self, response: Dict) -> str:
         """
@@ -473,6 +675,11 @@ class AnalyzeResponse(BaseModel):
     elapsed_seconds: float
     routing: str
     formatted_message: str
+    hitl_required: bool = False
+    hitl_reason: Optional[str] = None
+    session_id: Optional[str] = None
+    session_length: int = 0
+    memory_records_retrieved: int = 0
 
 
 class EducateRequest(BaseModel):
@@ -518,31 +725,43 @@ async def health():
 
 
 @app.post("/analyze", response_model=AnalyzeResponse)
-async def analyze(req: AnalyzeRequest):
+async def analyze(req: AnalyzeRequest, response: Response, request: Request):
     """
     Main endpoint: submit an analytical query.
-    
+
+    Returns HTTP 200 on success.
+    Returns HTTP 202 when confidence is below the HITL threshold — the
+    result is still populated but `hitl_required=true` signals that a
+    human should review before acting on the output.
+    Returns HTTP 429 when the per-IP rate limit is exceeded.
+
     Moltis hooks call this when a user sends a message
     that matches the analytical intent pattern.
     """
+    _check_rate_limit(_limiter_analyze, request)
     bridge = get_bridge()
     result = await bridge.handle_query(
         req.query,
         context={"channel": req.channel, "user_id": req.user_id, "session_id": req.session_id},
     )
-    return AnalyzeResponse(**{k: v for k, v in result.items() if k in AnalyzeResponse.model_fields})
+    body = AnalyzeResponse(**{k: v for k, v in result.items() if k in AnalyzeResponse.model_fields})
+    if body.hitl_required:
+        response.status_code = 202
+    return body
 
 
 @app.post("/webhook/moltis")
 async def moltis_webhook(request: Request):
     """
     Webhook endpoint for Moltis hook system.
-    
+    Returns HTTP 429 when the per-IP rate limit is exceeded.
+
     Configure in Moltis HOOK.md:
         name: andrew-analytics
         event: MessageReceived
         handler: http://localhost:8100/webhook/moltis
     """
+    _check_rate_limit(_limiter_webhook, request)
     body = await request.json()
     message = body.get("message", {}).get("content", "")
     channel = body.get("channel", "unknown")
@@ -577,14 +796,16 @@ async def moltis_webhook(request: Request):
 
 
 @app.post("/educate", response_model=EducateResponse)
-async def educate(req: EducateRequest):
+async def educate(req: EducateRequest, request: Request):
     """
     Ask Romeo PhD an educational question.
+    Returns HTTP 429 when the per-IP rate limit is exceeded.
 
     Romeo handles conceptual, theoretical, and explanatory queries about
     data science, ML, statistics, mathematics, and programming.
     Returns a Markdown-formatted explanation.
     """
+    _check_rate_limit(_limiter_educate, request)
     from core.romeo_phd import RomeoExecutor  # lazy import — keeps bridge fast when unused
 
     executor = RomeoExecutor()
@@ -604,6 +825,33 @@ async def schedule_analysis(req: ScheduleRequest):
     if success:
         return {"status": "scheduled", "schedule": req.cron_schedule, "query": req.query}
     raise HTTPException(status_code=500, detail="Failed to create cron job in Moltis")
+
+
+@app.on_event("startup")
+async def startup():
+    """Schedule the daily staleness sweep background task."""
+    async def _sweep_loop():
+        SWEEP_INTERVAL_S = int(os.getenv("STALENESS_SWEEP_INTERVAL_S", str(24 * 3600)))
+        while True:
+            await asyncio.sleep(SWEEP_INTERVAL_S)
+            try:
+                result = await asyncio.to_thread(_consolidation_engine.staleness_sweep)
+                logger.info(f"Daily staleness sweep: {result}")
+            except Exception as exc:
+                logger.warning(f"Staleness sweep failed: {exc}")
+
+    asyncio.create_task(_sweep_loop())
+
+
+@app.post("/session/{session_id}/end")
+async def end_session(session_id: str):
+    """
+    Explicitly close a session and consolidate episodic → semantic memory.
+    Called by channel disconnect hooks or explicit user action.
+    """
+    bridge = get_bridge()
+    record_id = await bridge.end_session(session_id)
+    return {"session_id": session_id, "consolidated_record": record_id}
 
 
 @app.on_event("shutdown")
