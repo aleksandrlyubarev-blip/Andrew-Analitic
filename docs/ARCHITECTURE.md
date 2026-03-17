@@ -23,10 +23,17 @@ User (Telegram / Discord / Web UI / API)
 
 ## Core Engine Pipeline
 
+Double Diamond structure — four phases:
+
 ```
 START
+  ── Phase 1: Explore Data ────────────────────────────────────────────────────
+  -> profile_schema          [build DataProfile: row counts, null rates, stats]
+  ── Phase 2: Define Hypothesis ───────────────────────────────────────────────
   -> route_query_intent      [SemanticRouter: cosine + keyword + procedural bias]
   -> build_intent_contract   [constrain allowed tables/ops/metrics]
+  -> hypothesis_gate         [quality checks: empty table, high-null penalty]
+  ── Phase 3: Run Analysis ────────────────────────────────────────────────────
   -> generate_sql            [LLM, model from router] [retry_policy: 3x]
   -> validate_sql            [sqlglot qualify + schema + blocklist]
   -> [error? -> END]
@@ -34,14 +41,33 @@ START
   -> generate_python         [LLM, model from router] [retry_policy: 3x]
   -> validate_python_static  [AST safety + leakage detection]
   -> [error? -> END]
-  -> sandbox_execute          [Moltis Docker / E2B / subprocess] [retry_policy: 2x]
+  -> sandbox_execute         [Moltis Docker / E2B / subprocess] [retry_policy: 2x]
   -> [error? -> END]
-  -> validate_results         [Pandera + completeness checks]
-  -> semantic_guardrails      [intent-to-query alignment]
-  -> hitl_escalate            [fires when confidence < HITL_CONFIDENCE_THRESHOLD]
-  -> finalize_state           [SHA-256 hash + audit log]
+  ── Phase 4: Validate Results ────────────────────────────────────────────────
+  -> validate_results        [Pandera + empty DF + zero-variance + all-null checks]
+  -> semantic_guardrails     [intent-to-query alignment]
+  -> hitl_escalate           [fires when confidence < HITL_CONFIDENCE_THRESHOLD]
+  -> finalize_state          [SHA-256 hash + audit log]
   -> END
 ```
+
+### `profile_schema` (Phase 1)
+
+Runs `_build_data_profile(db_url, schema)` against the configured database:
+
+- Row count per table; `empty_table` quality flag when count = 0
+- Per-column: dtype, null rate, MIN/MAX/AVG (numeric), top-5 values (categorical)
+- Quality flags: `all_null`, `zero_variance`, `high_null_rate`
+- 50 000-row cap + 5 s connection timeout; no-op when `db_url` or `schema_context` absent
+- Populates `state["data_profile"]` (plain dict, JSON-safe)
+
+### `hypothesis_gate` (Phase 2)
+
+Checks the profile before any LLM call:
+
+- **Empty-table penalty**: lowers `confidence` by 0.2 per empty table; appends warning
+- **High-null warning**: alerts when a column referenced in the user request has null_rate > 0.5
+- No-op when `error_message` is set or `data_profile` is None
 
 ## Routing Lanes
 
@@ -176,3 +202,6 @@ the database or runs code.
 | `test_semantic_router.py` | ~30 | Scoring, registry, fallback, routing log |
 | `test_memory.py` | 28 | Consolidation, staleness sweep, dedup, procedural store |
 | `test_rate_limit.py` | 22 | Allow/deny, window expiry, thread safety, env override |
+| `test_double_diamond.py` | 25 | DataProfile dataclasses, _build_data_profile, profile_schema, hypothesis_gate, validate_results stat checks |
+
+**Total: 166 tests** (all offline — no LLM calls, no live DB connections).

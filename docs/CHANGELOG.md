@@ -1,5 +1,44 @@
 # Changelog
 
+## v1.4.0 (2026-03-17) — Sprint 9: Double Diamond Analytics Workflow
+
+### Core Engine (`core/andrew_swarm.py`)
+- New dataclasses: `ColumnProfile`, `TableProfile`, `DataProfile` — structured statistical profile of the database
+- `_build_data_profile(db_url, schema)` — offline SQLAlchemy profiler:
+  - Row count per table; quality flag `empty_table` when count = 0
+  - Per-column: dtype, null rate, MIN/MAX/AVG (numeric), top-5 values (categorical)
+  - Quality flags: `all_null`, `zero_variance`, `high_null_rate`
+  - 50 000-row cap + 5-second SQLAlchemy pool timeout; returns `DataProfile(error=…)` on failure
+- `_dataprofile_to_dict()` — serialises `DataProfile` to plain dict for state propagation
+- `profile_schema(state)` node — **Phase 1 (Explore Data)**:
+  - No-op when `db_url` or `schema_context` is absent
+  - Merges profile warnings into `state["warnings"]`
+  - Writes `data_profile` dict to state
+- `hypothesis_gate(state)` node — **Phase 2 (Define Hypothesis)**:
+  - No-op when `error_message` present or `data_profile` is None
+  - Empty-table penalty: lowers `confidence` by 0.2 per empty table; appends warning
+  - High-null-rate penalty: warns on any column with null_rate > 0.5 that appears in the user request
+- `validate_results(state)` enhanced — **Phase 4 (Validate Results)**:
+  - Empty DataFrame: lowers `confidence` by 0.2; appends `"0 rows returned"` warning
+  - Zero-variance numeric column: appends `"zero variance in <col>"` warning
+  - All-null column: appends `"<col> is entirely null"` warning
+- LangGraph pipeline extended:
+  ```
+  START → profile_schema → route_query_intent → build_intent_contract
+        → hypothesis_gate → generate_sql → … (existing) → validate_results → END
+  ```
+
+### Tests
+- 25 new tests in `tests/test_double_diamond.py` (offline, SQLite in-process):
+  - Dataclass defaults and `_dataprofile_to_dict` serialisation
+  - `_build_data_profile`: row count, numeric stats, categorical top-values, empty table, all-null column, zero-variance, bad URL, empty schema
+  - `profile_schema`: no-op paths, profile returned, warnings appended
+  - `hypothesis_gate`: empty-table penalty, high-null warning, clean-data noop, skip on error/no profile
+  - `validate_results`: empty DF, zero variance, all-null, clean data
+- Total test count: **166 passing**
+
+---
+
 ## v1.3.0 (2026-03-16) — Sprint 6: Security Hardening
 
 ### Bridge rate limiting (new)
