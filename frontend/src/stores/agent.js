@@ -12,13 +12,16 @@ export const useAgentStore = defineStore('agent', () => {
 
   // Latest Andrew data for the data panel
   const latestData = ref({
-    queryResults: [],
-    sqlQuery:     '',
-    narrative:    '',
-    confidence:   null,
-    costUsd:      null,
-    routing:      '',
+    queryResults:  [],
+    sqlQuery:      '',
+    narrative:     '',
+    confidence:    null,
+    costUsd:       null,
+    routing:       '',
     elapsedSeconds: null,
+    dataProfile:   null,    // DataProfile from Phase 1 (Explore Data)
+    hitlRequired:  false,   // true when confidence < HITL_CONFIDENCE_THRESHOLD
+    hitlReason:    null,
   })
 
   // ── Getters ───────────────────────────────────────────────
@@ -57,25 +60,30 @@ export const useAgentStore = defineStore('agent', () => {
           agent: 'andrew',
           text: result.narrative || result.error || 'No output.',
           meta: {
-            confidence: result.confidence,
-            costUsd: result.cost_usd,
-            routing: result.routing,
+            confidence:   result.confidence,
+            costUsd:      result.cost_usd,
+            routing:      result.routing,
             elapsedSeconds: result.elapsed_seconds,
-            success: result.success,
+            success:      result.success,
+            hitlRequired: result.hitl_required || false,
+            hitlReason:   result.hitl_reason || null,
           },
         }
         andrewMessages.value.push(botMsg)
 
-        // Update data panel
-        if (result.success) {
+        // Update data panel (even on partial results — show profile if available)
+        if (result.success || result.data_profile) {
           latestData.value = {
-            queryResults:   result.query_results || [],
-            sqlQuery:       result.sql_query || '',
-            narrative:      result.narrative || '',
-            confidence:     result.confidence,
-            costUsd:        result.cost_usd,
-            routing:        result.routing,
+            queryResults:  result.query_results || [],
+            sqlQuery:      result.sql_query || '',
+            narrative:     result.narrative || '',
+            confidence:    result.confidence,
+            costUsd:       result.cost_usd,
+            routing:       result.routing,
             elapsedSeconds: result.elapsed_seconds,
+            dataProfile:   result.data_profile || null,
+            hitlRequired:  result.hitl_required || false,
+            hitlReason:    result.hitl_reason || null,
           }
         }
       } else {

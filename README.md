@@ -2,7 +2,7 @@
 
 > Andrew Swarm analyses data. Romeo PhD explains it. One dark-themed UI to rule them both.
 
-**Release: v1.3.0** — Rate limiting, adversarial test suite, HITL escalation, semantic routing, memory architecture.
+**Release: v1.4.0** — Double Diamond Analytics Workflow (Explore → Hypothesis → Analyse → Validate), rate limiting, adversarial test suite, HITL escalation, semantic routing, memory architecture.
 
 ## What It Does
 
@@ -186,6 +186,7 @@ andrew-swarm/
     test_semantic_router.py  # 30 semantic router tests
     test_memory.py        # 28 memory + consolidation tests
     test_rate_limit.py    # 22 rate-limiter tests
+    test_double_diamond.py  # 25 Double Diamond workflow tests
   docs/
     ARCHITECTURE.md
     CHANGELOG.md
@@ -239,6 +240,7 @@ RATE_LIMIT_WEBHOOK=30/60
 - [x] Sprint 6: Adversarial test suite (20 tests, 8 threat vectors) + Bridge rate limiting (22 tests, HTTP 429, `Retry-After`)
 - [x] Sprint 7: HITL escalation — `hitl_escalate` LangGraph node, HTTP 202, 13 tests
 - [x] Sprint 8: Romeo PhD educational agent + Vue 3 split-view web UI
+- [x] Sprint 9: Double Diamond workflow — `profile_schema` + `hypothesis_gate` nodes, statistical quality gates, 25 tests
 
 ## License
 

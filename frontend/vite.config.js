@@ -17,4 +17,9 @@ export default defineConfig({
     outDir: '../bridge/static',
     emptyOutDir: true,
   },
+  test: {
+    environment: 'jsdom',
+    globals: true,
+    setupFiles: [],
+  },
 })
