@@ -18,6 +18,8 @@ import logging
 import os
 import re
 import tempfile
+import time
+from dataclasses import dataclass, field as dc_field
 from typing import Any, Dict, List, Optional, Tuple, TypedDict
 
 import pandas as pd
@@ -90,6 +92,9 @@ class AndrewState(TypedDict, total=False):
     session_length: int
     memory_records_retrieved: int
 
+    # Double Diamond workflow (Sprint 9)
+    data_profile: Dict[str, Any]
+
 
 class AndrewResult:
     """Structured output for ROMA bridge and human consumption."""
@@ -109,6 +114,7 @@ class AndrewResult:
         self.routing = state.get("routing_decision", "")
         self.routing_log = state.get("routing_log", {})
         self.model_used = state.get("python_model", "")
+        self.data_profile = state.get("data_profile") or {}
         self.hitl_required = state.get("hitl_required", False)
         self.hitl_reason = state.get("hitl_reason", "")
 
@@ -746,6 +752,27 @@ def validate_results(state: AndrewState) -> Dict[str, Any]:
         confidence -= 0.3
         _warn(state, "No output data")
 
+    # ── Double Diamond: statistical result validation ──────────────────────
+    if csv_path:
+        try:
+            df = pd.read_csv(csv_path)
+            if df.empty:
+                _warn(state, "validate_results: query returned 0 rows")
+                confidence -= 0.20
+            else:
+                # Zero-variance numeric columns
+                for col in df.select_dtypes(include="number").columns:
+                    if df[col].dropna().nunique() <= 1:
+                        _warn(state, f"validate_results: '{col}' has zero variance")
+                        confidence -= 0.05
+                # Entirely-null columns
+                for col in df.columns:
+                    if df[col].isna().all():
+                        _warn(state, f"validate_results: '{col}' is entirely null")
+                        confidence -= 0.10
+        except Exception:
+            pass  # CSV already handled above; don't double-fault
+
     return {"confidence": clamp(confidence), "error_message": ""}
 
 
@@ -830,11 +857,285 @@ def route_on_error(state: AndrewState) -> str:
 
 
 # ============================================================
+# 19b. DOUBLE DIAMOND WORKFLOW  (Sprint 9)
+#
+# Explore Data  →  Define Hypothesis  →  Run Analysis  →  Validate Results
+# profile_schema   hypothesis_gate      (existing pipeline)  validate_results (enhanced)
+# ============================================================
+
+# ── Data Profile dataclasses ──────────────────────────────────────────────────
+
+@dataclass
+class ColumnProfile:
+    """Statistical profile of a single database column."""
+    dtype: str
+    null_rate: float          # fraction of NULLs in sample  (0.0 – 1.0)
+    row_count: int            # non-null count in sample
+    min_val: Optional[float] = None
+    max_val: Optional[float] = None
+    mean_val: Optional[float] = None
+    top_values: List[Any] = dc_field(default_factory=list)  # top-5 most frequent
+    quality_flags: List[str] = dc_field(default_factory=list)
+    # flags: "high_null_rate", "zero_variance", "all_null"
+
+
+@dataclass
+class TableProfile:
+    """Profile of a single table."""
+    row_count: int
+    columns: Dict[str, ColumnProfile] = dc_field(default_factory=dict)
+    quality_flags: List[str] = dc_field(default_factory=list)
+    # flags: "empty_table"
+
+
+@dataclass
+class DataProfile:
+    """Full schema-level data profile produced by profile_schema()."""
+    tables: Dict[str, TableProfile] = dc_field(default_factory=dict)
+    profiled_at: float = dc_field(default_factory=time.time)
+    warnings: List[str] = dc_field(default_factory=list)
+    error: Optional[str] = None
+
+
+# ── _build_data_profile ────────────────────────────────────────────────────────
+
+_NUMERIC_TYPES = ("int", "float", "double", "decimal", "numeric", "real", "bigint", "smallint")
+_PROFILE_TIMEOUT_S = 5.0
+_PROFILE_SAMPLE = 50_000     # max rows profiled per table
+
+
+def _build_data_profile(
+    db_url: str,
+    schema: Dict[str, Dict[str, str]],
+) -> DataProfile:
+    """
+    Profile each table in `schema`: row counts, null rates, numeric
+    min/max/mean, top-5 categorical values, quality flags.
+
+    Runs in ≤ _PROFILE_TIMEOUT_S seconds by skipping remaining tables when
+    the deadline is exceeded.  Table/column names are taken from the real
+    DB schema, so direct string interpolation is safe here.
+    """
+    deadline = time.time() + _PROFILE_TIMEOUT_S
+    tables: Dict[str, TableProfile] = {}
+    warnings: List[str] = []
+
+    try:
+        engine = create_engine(db_url, pool_pre_ping=True)
+        with engine.connect() as conn:
+            for table_name, columns in schema.items():
+                if time.time() > deadline:
+                    warnings.append(
+                        f"data_profile: timeout after {_PROFILE_TIMEOUT_S}s; "
+                        f"skipped remaining tables"
+                    )
+                    break
+
+                # ── Row count ────────────────────────────────────────────────
+                row_count = conn.execute(
+                    text(f'SELECT COUNT(*) FROM "{table_name}"')
+                ).scalar() or 0
+
+                sample = min(row_count, _PROFILE_SAMPLE)
+                col_profiles: Dict[str, ColumnProfile] = {}
+
+                for col_name, dtype_str in columns.items():
+                    # ── Null rate ─────────────────────────────────────────────
+                    if sample > 0:
+                        r = conn.execute(text(
+                            f'SELECT COUNT("{col_name}") AS nn, COUNT(*) AS tot '
+                            f'FROM (SELECT "{col_name}" FROM "{table_name}" '
+                            f'LIMIT {sample}) AS _s'
+                        )).fetchone()
+                        non_null, total_in_sample = (r[0] or 0), (r[1] or 1)
+                        null_rate = 1.0 - (non_null / total_in_sample)
+                    else:
+                        non_null, null_rate = 0, 0.0
+
+                    # ── Numeric stats / categorical top-values ────────────────
+                    is_numeric = any(t in dtype_str.lower() for t in _NUMERIC_TYPES)
+                    min_val = max_val = mean_val = None
+                    top_values: List[Any] = []
+
+                    if is_numeric and non_null > 0:
+                        row = conn.execute(text(
+                            f'SELECT MIN(c), MAX(c), AVG(c) FROM '
+                            f'(SELECT CAST("{col_name}" AS FLOAT) AS c '
+                            f'FROM "{table_name}" WHERE "{col_name}" IS NOT NULL '
+                            f'LIMIT {sample}) AS _s'
+                        )).fetchone()
+                        if row and row[0] is not None:
+                            min_val = float(row[0])
+                            max_val = float(row[1])
+                            mean_val = float(row[2])
+                    elif non_null > 0:
+                        rows = conn.execute(text(
+                            f'SELECT "{col_name}", COUNT(*) AS cnt '
+                            f'FROM "{table_name}" '
+                            f'WHERE "{col_name}" IS NOT NULL '
+                            f'GROUP BY "{col_name}" ORDER BY cnt DESC LIMIT 5'
+                        )).fetchall()
+                        top_values = [str(r[0]) for r in rows]
+
+                    # ── Quality flags ─────────────────────────────────────────
+                    qflags: List[str] = []
+                    if null_rate > 0.8:
+                        qflags.append("high_null_rate")
+                    if non_null == 0 and row_count > 0:
+                        qflags.append("all_null")
+                    if is_numeric and min_val is not None and min_val == max_val:
+                        qflags.append("zero_variance")
+
+                    col_profiles[col_name] = ColumnProfile(
+                        dtype=dtype_str,
+                        null_rate=round(null_rate, 4),
+                        row_count=non_null,
+                        min_val=min_val,
+                        max_val=max_val,
+                        mean_val=round(mean_val, 6) if mean_val is not None else None,
+                        top_values=top_values,
+                        quality_flags=qflags,
+                    )
+
+                # ── Table quality flags ───────────────────────────────────────
+                table_flags: List[str] = []
+                if row_count == 0:
+                    table_flags.append("empty_table")
+                    warnings.append(f"data_profile: '{table_name}' is empty")
+
+                tables[table_name] = TableProfile(
+                    row_count=row_count,
+                    columns=col_profiles,
+                    quality_flags=table_flags,
+                )
+    except Exception as exc:
+        return DataProfile(error=str(exc), warnings=[f"data_profile failed: {exc}"])
+
+    return DataProfile(tables=tables, warnings=warnings)
+
+
+def _dataprofile_to_dict(dp: DataProfile) -> Dict[str, Any]:
+    """Serialize DataProfile to a plain dict for AndrewState storage."""
+    return {
+        "tables": {
+            tname: {
+                "row_count": tp.row_count,
+                "quality_flags": tp.quality_flags,
+                "columns": {
+                    cname: {
+                        "dtype": cp.dtype,
+                        "null_rate": cp.null_rate,
+                        "row_count": cp.row_count,
+                        "min_val": cp.min_val,
+                        "max_val": cp.max_val,
+                        "mean_val": cp.mean_val,
+                        "top_values": cp.top_values,
+                        "quality_flags": cp.quality_flags,
+                    }
+                    for cname, cp in tp.columns.items()
+                },
+            }
+            for tname, tp in dp.tables.items()
+        },
+        "profiled_at": dp.profiled_at,
+        "warnings": dp.warnings,
+        "error": dp.error,
+    }
+
+
+# ── NODE: profile_schema ──────────────────────────────────────────────────────
+
+def profile_schema(state: AndrewState) -> Dict[str, Any]:
+    """
+    Double Diamond — Phase 1: Explore Data.
+
+    Profiles the database schema: row counts, null rates, value distributions.
+    Non-blocking — failures produce a warning but never set error_message.
+    """
+    db_url = state.get("db_url", "")
+    schema = state.get("schema_context") or {}
+
+    if not db_url or not schema:
+        return {}
+
+    try:
+        dp = _build_data_profile(db_url, schema)
+        updates: Dict[str, Any] = {"data_profile": _dataprofile_to_dict(dp)}
+        if dp.warnings:
+            updates["warnings"] = list(state.get("warnings", [])) + dp.warnings
+        _audit(state, "profile_schema", {
+            "tables": list(dp.tables.keys()),
+            "error": dp.error,
+        })
+        return updates
+    except Exception as exc:
+        logger.warning(f"profile_schema failed (non-fatal): {exc}")
+        return {}
+
+
+# ── NODE: hypothesis_gate ─────────────────────────────────────────────────────
+
+def hypothesis_gate(state: AndrewState) -> Dict[str, Any]:
+    """
+    Double Diamond — Phase 2: Define Hypothesis quality gate.
+
+    Checks that the data can plausibly support the user's question:
+    - Empty tables → confidence penalty + warning
+    - Columns referenced in the query with > 80% null rate → warning
+
+    Never blocks the pipeline — adds warnings and adjusts confidence only.
+    """
+    if state.get("error_message"):
+        return {}
+
+    profile = state.get("data_profile") or {}
+    if not profile or profile.get("error"):
+        return {}
+
+    goal = (state.get("user_request") or state.get("goal", "")).lower()
+    intent = state.get("intent_contract") or {}
+    allowed_tables = intent.get("allowed_tables") or list(profile.get("tables", {}).keys())
+    warnings = list(state.get("warnings", []))
+    confidence = state.get("confidence", 0.5)
+
+    for tname in allowed_tables:
+        tprof = profile.get("tables", {}).get(tname)
+        if not tprof:
+            continue
+
+        # Gate 1: empty table
+        if tprof.get("row_count", -1) == 0:
+            warnings.append(
+                f"hypothesis_gate: '{tname}' is empty — "
+                f"analysis will likely return no results"
+            )
+            confidence -= 0.20
+
+        # Gate 2: high-null columns mentioned in the question
+        for col_name, cprof in tprof.get("columns", {}).items():
+            if cprof.get("null_rate", 0) > 0.8 and col_name.lower() in goal:
+                warnings.append(
+                    f"hypothesis_gate: '{col_name}' has "
+                    f"{cprof['null_rate']:.0%} null rate — "
+                    f"results for this metric may be unreliable"
+                )
+
+    _audit(state, "hypothesis_gate", {"tables_checked": allowed_tables})
+    updates: Dict[str, Any] = {"warnings": warnings}
+    if confidence != state.get("confidence", 0.5):
+        updates["confidence"] = clamp(confidence)
+    return updates
+
+
+
+# ============================================================
 # 18. GRAPH WIRING
 # ============================================================
 
 workflow = StateGraph(AndrewState)
 
+workflow.add_node("profile_schema", profile_schema)
+workflow.add_node("hypothesis_gate", hypothesis_gate)
 workflow.add_node("route_query_intent", route_query_intent)
 workflow.add_node("build_intent_contract", build_intent_contract)
 workflow.add_node("generate_sql", generate_sql, retry_policy=llm_retry)
@@ -848,9 +1149,11 @@ workflow.add_node("semantic_guardrails", semantic_guardrails)
 workflow.add_node("hitl_escalate", hitl_escalate)
 workflow.add_node("finalize_state", finalize_state)
 
-workflow.add_edge(START, "route_query_intent")
+workflow.add_edge(START, "profile_schema")
+workflow.add_edge("profile_schema", "route_query_intent")
 workflow.add_edge("route_query_intent", "build_intent_contract")
-workflow.add_edge("build_intent_contract", "generate_sql")
+workflow.add_edge("build_intent_contract", "hypothesis_gate")
+workflow.add_edge("hypothesis_gate", "generate_sql")
 workflow.add_edge("generate_sql", "validate_sql")
 
 workflow.add_conditional_edges("validate_sql", route_on_error, {
