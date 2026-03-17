@@ -32,6 +32,9 @@
         <span class="meta-chip" :class="msg.meta.success ? 'chip-ok' : 'chip-err'">
           {{ msg.meta.success ? '✓' : '✗' }}
         </span>
+        <span v-if="msg.meta.hitlRequired" class="meta-chip chip-hitl" :title="msg.meta.hitlReason">
+          ⚠ Awaiting Review
+        </span>
       </div>
     </div>
   </div>
@@ -120,8 +123,9 @@ const renderedMarkdown = computed(() => {
 .chip-route { background: var(--andrew-dim); color: var(--andrew); }
 .chip-cost  { color: var(--warning); }
 .chip-time  { color: var(--text-muted); }
-.chip-ok    { background: rgba(34,197,94,0.1); color: var(--success); }
-.chip-err   { background: rgba(239,68,68,0.1); color: var(--error); }
+.chip-ok    { background: rgba(34,197,94,0.1);  color: var(--success); }
+.chip-err   { background: rgba(239,68,68,0.1);  color: var(--error); }
+.chip-hitl  { background: rgba(245,158,11,0.15); color: var(--warning); font-weight: 600; }
 
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(6px); }

@@ -33,6 +33,7 @@ import json
 import logging
 import os
 import threading
+import uuid
 import time
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
@@ -182,10 +183,24 @@ EPISODIC_MAX_ENTRIES = int(os.getenv("EPISODIC_MAX_ENTRIES", "20"))
 # Shared memory + router singletons (Sprint 5 §5.4)
 from core.memory import _semantic_store, _consolidation_engine, SweepResult  # noqa: E402
 from core.semantic_router import _semantic_router                              # noqa: E402
+from core.andrew_swarm import get_stored_result                                # noqa: E402
 
 # ── Bridge uptime + last sweep tracking ───────────────────────────────────────
 _bridge_start_time: float = 0.0
 _last_sweep: Optional[SweepResult] = None
+
+# ── In-process job scheduler ───────────────────────────────────────────────────
+# _job_store: job_id → {"id", "name", "query", "cron_expr",
+#                        "next_run", "last_run", "run_count", "created_at"}
+_job_store: Dict[str, Dict] = {}
+_job_store_lock = threading.Lock()
+
+try:
+    from croniter import croniter as _croniter
+    _CRONITER_AVAILABLE = True
+except ImportError:
+    _CRONITER_AVAILABLE = False
+    logger.warning("croniter not installed — in-process scheduler disabled; pip install croniter")
 
 
 # ============================================================
@@ -650,15 +665,45 @@ async def lifespan(app: FastAPI):
             except Exception as exc:
                 logger.warning(f"Staleness sweep failed: {exc}")
 
-    sweep_task = asyncio.create_task(_sweep_loop())
+    async def _scheduler_loop():
+        """Run due in-process scheduled jobs every 60 s."""
+        while True:
+            await asyncio.sleep(60)
+            if not _CRONITER_AVAILABLE:
+                continue
+            now = time.time()
+            with _job_store_lock:
+                due = [j for j in _job_store.values() if j["next_run"] <= now]
+            for job in due:
+                try:
+                    bridge = get_bridge()
+                    result = await bridge.handle_query(
+                        job["query"],
+                        context={"channel": "scheduler", "scheduled": True, "job_id": job["id"]},
+                    )
+                    logger.info(f"Scheduled job {job['name']} ran; success={result.get('success')}")
+                    with _job_store_lock:
+                        if job["id"] in _job_store:
+                            _job_store[job["id"]]["last_run"] = now
+                            _job_store[job["id"]]["run_count"] += 1
+                            _job_store[job["id"]]["next_run"] = _croniter(
+                                job["cron_expr"], now
+                            ).get_next(float)
+                except Exception as exc:
+                    logger.warning(f"Scheduled job {job['name']} failed: {exc}")
+
+    sweep_task     = asyncio.create_task(_sweep_loop())
+    scheduler_task = asyncio.create_task(_scheduler_loop())
     try:
         yield
     finally:
         sweep_task.cancel()
-        try:
-            await sweep_task
-        except asyncio.CancelledError:
-            pass
+        scheduler_task.cancel()
+        for t in (sweep_task, scheduler_task):
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
         if _bridge:
             await _bridge.close()
 
@@ -878,18 +923,67 @@ async def educate(req: EducateRequest, request: Request):
     return EducateResponse(**result.to_dict())
 
 
-@app.post("/schedule")
+@app.post("/schedule", status_code=201)
 async def schedule_analysis(req: ScheduleRequest):
-    """Schedule a recurring analytical task via Moltis cron."""
-    bridge = get_bridge()
-    success = await bridge.moltis.add_cron_job(
-        schedule=req.cron_schedule,
-        task=req.query,
-        name=req.name,
-    )
-    if success:
-        return {"status": "scheduled", "schedule": req.cron_schedule, "query": req.query}
-    raise HTTPException(status_code=500, detail="Failed to create cron job in Moltis")
+    """Schedule a recurring analytical task (in-process + Moltis cron fallback)."""
+    if not _CRONITER_AVAILABLE:
+        raise HTTPException(status_code=503, detail="croniter not installed; pip install croniter")
+
+    try:
+        next_run = _croniter(req.cron_schedule, time.time()).get_next(float)
+    except Exception:
+        raise HTTPException(status_code=400, detail=f"Invalid cron expression: {req.cron_schedule!r}")
+
+    job_id = str(uuid.uuid4())
+    name   = req.name or f"job-{job_id[:8]}"
+    with _job_store_lock:
+        _job_store[job_id] = {
+            "id":         job_id,
+            "name":       name,
+            "query":      req.query,
+            "cron_expr":  req.cron_schedule,
+            "next_run":   next_run,
+            "last_run":   None,
+            "run_count":  0,
+            "created_at": time.time(),
+        }
+
+    # Best-effort: also register with Moltis GraphQL (non-fatal)
+    try:
+        bridge = get_bridge()
+        await bridge.moltis.add_cron_job(schedule=req.cron_schedule, task=req.query, name=name)
+    except Exception as exc:
+        logger.debug(f"Moltis cron registration skipped: {exc}")
+
+    return {"status": "scheduled", "job_id": job_id, "name": name,
+            "cron_schedule": req.cron_schedule, "next_run": next_run, "query": req.query}
+
+
+@app.get("/schedule")
+async def list_scheduled_jobs():
+    """List all in-process scheduled jobs."""
+    with _job_store_lock:
+        jobs = list(_job_store.values())
+    return {"jobs": jobs, "count": len(jobs)}
+
+
+@app.delete("/schedule/{job_id}", status_code=200)
+async def delete_scheduled_job(job_id: str):
+    """Remove an in-process scheduled job by ID."""
+    with _job_store_lock:
+        if job_id not in _job_store:
+            raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found")
+        removed = _job_store.pop(job_id)
+    return {"status": "removed", "job_id": job_id, "name": removed["name"]}
+
+
+@app.get("/results/{hash_hex}")
+async def get_result(hash_hex: str):
+    """Return the persisted result snapshot for a given SHA-256 hash."""
+    snapshot = get_stored_result(hash_hex)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail=f"No result found for hash {hash_hex!r}")
+    return snapshot
 
 
 @app.post("/session/{session_id}/end")

@@ -37,6 +37,15 @@ from sqlalchemy import create_engine, text
 logging.basicConfig(level=logging.INFO, format="%(name)s | %(levelname)s | %(message)s")
 logger = logging.getLogger("andrew")
 
+# Module-level result store: SHA-256 hash → snapshot dict (capped at 500 entries)
+_result_store: Dict[str, Dict[str, Any]] = {}
+_RESULT_STORE_MAX = 500
+
+
+def get_stored_result(hash_hex: str) -> Optional[Dict[str, Any]]:
+    """Return the stored result snapshot for the given SHA-256 hash, or None."""
+    return _result_store.get(hash_hex)
+
 
 # ============================================================
 # 1. STATE
@@ -845,6 +854,24 @@ def finalize_state(state: AndrewState) -> Dict[str, Any]:
     }, sort_keys=True, default=str).encode()
     h = hashlib.sha256(blob).hexdigest()
     _audit(state, "finalize", {"status": "ok", "hash": h})
+
+    # Persist snapshot so GET /results/{hash} can retrieve it later
+    if len(_result_store) >= _RESULT_STORE_MAX:
+        # Evict oldest entry
+        oldest = next(iter(_result_store))
+        del _result_store[oldest]
+    _result_store[h] = {
+        "hash": h,
+        "user_request": state.get("user_request", state.get("goal", "")),
+        "sql_query": state.get("sql_query"),
+        "routing": state.get("routing_decision"),
+        "confidence": clamp(state.get("confidence", 0.5)),
+        "warnings": list(state.get("warnings", [])),
+        "hitl_required": bool(state.get("hitl_required")),
+        "hitl_reason": state.get("hitl_reason"),
+        "timestamp": time.time(),
+    }
+
     return {"state_hash": h, "confidence": clamp(state.get("confidence", 0.5))}
 
 

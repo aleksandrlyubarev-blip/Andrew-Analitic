@@ -30,6 +30,15 @@
         </div>
       </div>
 
+      <!-- HITL banner -->
+      <div v-if="data.hitlRequired" class="hitl-banner">
+        <span class="hitl-icon">⚠</span>
+        <div>
+          <strong>Human review required</strong>
+          <span v-if="data.hitlReason" class="hitl-reason"> — {{ data.hitlReason }}</span>
+        </div>
+      </div>
+
       <!-- Tabs: Profile / Table / Chart / SQL -->
       <div v-if="hasData" class="panel-tabs">
         <button
@@ -138,7 +147,8 @@ const data  = computed(() => store.latestData)
 const hasData = computed(() =>
   data.value.narrative ||
   data.value.queryResults?.length ||
-  data.value.sqlQuery
+  data.value.sqlQuery ||
+  data.value.dataProfile
 )
 
 const activeTab = ref('table')
@@ -242,6 +252,21 @@ const tips = [
   font-family: 'JetBrains Mono', monospace;
 }
 .cost-val { color: var(--warning); }
+
+/* ── HITL banner ───────────────────────────────────────── */
+.hitl-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  background: rgba(245,158,11,0.07);
+  border-bottom: 1px solid rgba(245,158,11,0.25);
+  font-size: 13px;
+  color: var(--warning);
+  flex-shrink: 0;
+}
+.hitl-icon   { font-size: 16px; }
+.hitl-reason { color: var(--text-muted); font-weight: 400; }
 
 /* ── Panel tabs ────────────────────────────────────────── */
 .panel-tabs {
