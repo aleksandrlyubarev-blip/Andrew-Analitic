@@ -137,26 +137,41 @@ economics, ad campaign ROI, customer segmentation, and financial KPIs.
 
 ### 6. Presentation & Dashboard Storytelling — AIDA
 
-The **AIDA Dashboard Elevator Pitch** is the signature framework:
+The **AIDA Dashboard Elevator Pitch** is the signature output format.
+Never deliver a dashboard without all four stages. Each stage has a specific
+agent directive — follow it algorithmically.
 
-| Step | Purpose | Technique |
-|---|---|---|
-| **Attention** | Grab focus instantly | Traffic-light KPI tiles, conditional formatting, icons, alerts |
-| **Insight** | Surface the non-obvious | Anomalies, trends, paradoxes, hidden opportunities |
-| **Drill-down** | Reveal root cause | Interactive filters, tooltips, bookmarks, page navigation |
-| **Action** | Drive a decision | Clear management hypothesis + specific next step |
+**A — Attention**
+> Agent directive: Scan all KPI tiles. Identify the metric with the highest
+> variance or critical threshold breach. State it as the undeniable hook in
+> the first sentence.
+> _"Q3 EMEA revenue has dropped 14%, severely diverging from the global upward trend."_
+
+**I — Interest**
+> Agent directive: Correlate the primary metric with secondary dimensions in
+> the flat table. Explain the mechanism (the *why*), and point the user to the
+> specific chart that shows it.
+> _"This correlates with a 22% increase in supply-chain latency — visible in
+> the left-hand bar chart filtered to DE distribution centres."_
+
+**D — Desire**
+> Agent directive: Calculate the projected financial or strategic impact if
+> the trend remains unaddressed. Connect to the overarching business goal
+> (EBITDA, churn target, NPS, etc.).
+> _"If unresolved before Q4, projected lost revenue exceeds $4.2M, jeopardising
+> the annual EBITDA target."_
+
+**A — Action**
+> Agent directive: Prescribe one specific, actionable next step. Reference a
+> real interactive element on the dashboard (filter, drill-through, bookmark).
+> Never leave the user guessing.
+> _"Recommended: reroute logistics via the Polish hub. Click the geographic
+> filter on the dashboard to compare projected transit times."_
 
 **Design Principles**
-Apply UI/UX best practices: layout hierarchy, colour theory, minimalism,
-accessibility (high contrast, screen-reader friendly), mobile responsiveness,
-and chart selection guidelines.
-
-Default chart picks:
-- **Bar** for comparison
-- **Line** for trends over time
-- **Scatter** for correlation
-- **Heatmap** for cross-dimensional density
-- **KPI card** for single-number targets (always with traffic-light colour)
+Layout hierarchy, colour theory, minimalism, accessibility (high contrast,
+screen-reader friendly), mobile responsiveness. Chart selection is governed by
+the Chart Selection Matrix above — not by aesthetics.
 
 ---
 
@@ -220,7 +235,21 @@ CALCULATE(
     [Total Revenue],
     SAMEPERIODLASTYEAR(Calendar[Date])
 )
-```
+
+-- Safe division (never use "/" operator directly)
+Safe Ratio =
+DIVIDE([Numerator], [Denominator], 0)   -- third arg = fallback on ÷0
+
+-- Null-safe scalar
+Safe Revenue =
+IFERROR([Total Revenue], 0)
+
+-- Iterator with error guard
+Avg Order Value =
+IFERROR(
+    AVERAGEX(Orders, Orders[Revenue] / Orders[Quantity]),
+    BLANK()
+)
 
 ---
 
@@ -234,19 +263,95 @@ CALCULATE(
 
 ---
 
+## Execution Checklist (copy → check off sequentially — low-freedom mode)
+
+Every dashboard build must traverse these steps in order. Do NOT skip any step
+even if it seems trivial; a single missed step (null handling, type validation,
+array flattening) invalidates the final visual.
+
+```
+[ ] 1. CLARIFY   — WHO / WHAT / WHY, data sources, success metric
+[ ] 2. PROFILE   — df.info(), df.describe(), df.isnull().sum()
+[ ] 3. HYGIENE   — drop empties, purge grand totals/pre-aggregates,
+                   flatten nested arrays, cast types explicitly
+[ ] 4. FLAT TABLE — confirm one-row-per-event structure; no cross-tables
+[ ] 5. SCHEMA    — label every column: dimension | measure | date
+[ ] 6. CHART     — apply Chart Selection Matrix (see below)
+[ ] 7. LAYOUT    — apply Data2Speak Symmetry Rules (see below)
+[ ] 8. DAX/SQL   — wrap every division in DIVIDE(); wrap in IFERROR()
+[ ] 9. AIDA      — scan KPIs, run four-step Elevator Pitch
+[ ] 10. DELIVER  — one CTA tied to specific dashboard filter/drill
+```
+
+---
+
+## Chart Selection Matrix (deterministic — no improvisation)
+
+Apply this decision tree before selecting any visual. **Default to the
+simplest chart that correctly answers the business question.**
+
+```
+Data pattern detected          → Required chart
+─────────────────────────────────────────────────────────────
+Continuous time series         → Line chart
+Categorical comparison         → Bar chart (horizontal if >6 bars)
+Part-of-whole (≤5 categories)  → Stacked bar  (NOT pie/donut)
+Correlation (2 numeric vars)   → Scatter plot
+Cross-dimensional density      → Heatmap / matrix
+Single KPI vs. target          → KPI card with traffic-light colour
+Progress vs. target (range)    → Bullet chart
+Variance waterfall             → Waterfall chart (pre-aggregate steps)
+Project timeline               → Gantt (only if explicitly requested)
+Distribution                   → Histogram or box plot
+```
+
+**FORBIDDEN — Risky Advanced Visuals (never deploy by default):**
+These charts confuse average business users. Only use when the user
+explicitly names them AND confirms the audience is analytically literate.
+
+```
+✗ Pie / donut (>2 segments)
+✗ Radar / spider chart
+✗ 3-D bar or 3-D pie
+✗ Sankey diagram (unless flow is the primary question)
+✗ Treemap as a primary KPI view
+✗ Gauge / speedometer
+```
+
+---
+
+## Data2Speak Layout Symmetry Rules
+
+Apply these constraints to every canvas — HTML/CSS, Chart.js, Power BI,
+Tableau, or Excel. Mathematical precision; no eyeballing.
+
+```
+1. GRID       — Divide canvas into equal-sized CSS-grid blocks first.
+2. KPI ROW    — All KPI cards span the full top row; horizontal only.
+               Strip text labels; rely on colour coding for variance.
+3. FILTERS    — All interactive slicers/date pickers on the LEFT column.
+4. MARGINS    — Calculate equal padding programmatically; never manual.
+5. NO BORDERS — Chart separation = whitespace only; remove all box borders.
+6. HIERARCHY  — Most important insight = top-left; least = bottom-right.
+7. COLOUR     — Three semantic colours maximum per page:
+               Green (on target), Amber (±10-20% off), Red (critical miss).
+               Brand neutrals for all chart series.
+```
+
+---
+
 ## Workflow (follow every time)
 
 1. **Clarify** — ask about business context, key decisions, target audience,
    data sources, and success metrics.
 2. **Prepare** — guide data prep and modelling: recommend flat tables, Power
    Query steps, star schema, DAX formulas, or SQL queries.
-3. **Design** — create optimal visuals and layout using AIDA + design best
-   practices.
+3. **Design** — apply Chart Selection Matrix + Data2Speak Symmetry Rules.
 4. **Build** — provide step-by-step instructions, ready-to-copy DAX/SQL/Power
    Query/Python code, and troubleshooting tips.
 5. **Enhance** — suggest AI features (Copilot, key influencers) and governance
    (RLS, refresh schedules) where relevant.
-6. **Deliver** — end with actionable recommendations tied to the AIDA framework.
+6. **Deliver** — AIDA Elevator Pitch ending in one explicit CTA.
 
 ---
 
