@@ -189,6 +189,20 @@ from core.andrew_swarm import get_stored_result                                #
 _bridge_start_time: float = 0.0
 _last_sweep: Optional[SweepResult] = None
 
+# ── Operational counters (in-process; reset on restart) ───────────────────────
+_metrics_lock = threading.Lock()
+_metrics: Dict[str, Any] = {
+    "queries_total": 0,
+    "queries_success": 0,
+    "queries_hitl": 0,
+    "queries_error": 0,
+    "educate_total": 0,
+    "total_cost_usd": 0.0,
+    "confidence_sum": 0.0,
+    "confidence_count": 0,
+    "routing_lanes": {"reasoning_math": 0, "analytics_fastlane": 0, "standard": 0},
+}
+
 # ── In-process job scheduler ───────────────────────────────────────────────────
 # _job_store: job_id → {"id", "name", "query", "cron_expr",
 #                        "next_run", "last_run", "run_count", "created_at"}
@@ -710,7 +724,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Andrew Swarm — Moltis Bridge",
-    version="1.3.0",
+    version="1.4.0",
     description="Connects Andrew's analytical brain to Moltis's Rust runtime",
     lifespan=lifespan,
 )
@@ -834,6 +848,45 @@ async def health():
     )
 
 
+@app.get("/metrics")
+async def metrics():
+    """
+    Operational metrics — queries processed, cost, confidence, routing distribution.
+    Counters reset on bridge restart (in-process only).
+    """
+    with _metrics_lock:
+        snap = dict(_metrics)
+    avg_confidence = (
+        round(snap["confidence_sum"] / snap["confidence_count"], 3)
+        if snap["confidence_count"] > 0 else None
+    )
+    success_rate = (
+        round(snap["queries_success"] / snap["queries_total"], 3)
+        if snap["queries_total"] > 0 else None
+    )
+    return {
+        "uptime_seconds": round(time.time() - _bridge_start_time, 1),
+        "queries": {
+            "total":   snap["queries_total"],
+            "success": snap["queries_success"],
+            "hitl":    snap["queries_hitl"],
+            "error":   snap["queries_error"],
+            "success_rate": success_rate,
+        },
+        "educate_total": snap["educate_total"],
+        "cost": {
+            "total_usd":      round(snap["total_cost_usd"], 4),
+            "avg_per_query":  round(snap["total_cost_usd"] / snap["queries_total"], 4)
+                              if snap["queries_total"] > 0 else None,
+        },
+        "confidence": {
+            "average": avg_confidence,
+            "samples": snap["confidence_count"],
+        },
+        "routing_lanes": snap["routing_lanes"],
+    }
+
+
 @app.post("/analyze", response_model=AnalyzeResponse)
 async def analyze(req: AnalyzeRequest, response: Response, request: Request):
     """
@@ -855,6 +908,23 @@ async def analyze(req: AnalyzeRequest, response: Response, request: Request):
         context={"channel": req.channel, "user_id": req.user_id, "session_id": req.session_id},
     )
     body = AnalyzeResponse(**{k: v for k, v in result.items() if k in AnalyzeResponse.model_fields})
+    with _metrics_lock:
+        _metrics["queries_total"] += 1
+        if body.error:
+            _metrics["queries_error"] += 1
+        elif body.hitl_required:
+            _metrics["queries_hitl"] += 1
+        else:
+            _metrics["queries_success"] += 1
+        _metrics["total_cost_usd"] += body.cost_usd or 0.0
+        if body.confidence is not None:
+            _metrics["confidence_sum"] += body.confidence
+            _metrics["confidence_count"] += 1
+        lane = (body.routing or "").lower()
+        for key in ("reasoning_math", "analytics_fastlane", "standard"):
+            if key in lane:
+                _metrics["routing_lanes"][key] += 1
+                break
     if body.hitl_required:
         response.status_code = 202
     return body
@@ -920,6 +990,8 @@ async def educate(req: EducateRequest, request: Request):
 
     executor = RomeoExecutor()
     result = await asyncio.to_thread(executor.execute, req.question)
+    with _metrics_lock:
+        _metrics["educate_total"] += 1
     return EducateResponse(**result.to_dict())
 
 
