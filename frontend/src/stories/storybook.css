@@ -1,0 +1,17 @@
+:root {
+  font-family: Inter, system-ui, sans-serif;
+  color: #f8fafc;
+}
+
+body {
+  margin: 0;
+  background:
+    radial-gradient(circle at top, rgba(59, 130, 246, 0.08), transparent 40%),
+    linear-gradient(180deg, #0b1220 0%, #111827 100%);
+}
+
+#storybook-root {
+  min-height: 100vh;
+  padding: 32px;
+  box-sizing: border-box;
+}

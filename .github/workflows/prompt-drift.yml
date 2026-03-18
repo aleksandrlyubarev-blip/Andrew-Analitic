@@ -1,0 +1,36 @@
+name: Prompt Drift
+
+on:
+  push:
+    branches: ["main", "claude/**", "codex/**"]
+    paths:
+      - "core/romeo_phd.py"
+      - "tests/test_romeo_prompt_contract.py"
+      - ".github/workflows/prompt-drift.yml"
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "core/romeo_phd.py"
+      - "tests/test_romeo_prompt_contract.py"
+      - ".github/workflows/prompt-drift.yml"
+
+jobs:
+  contract:
+    name: Romeo persona contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install minimal test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install python-dotenv pytest
+
+      - name: Verify Romeo prompt contract
+        run: python -m pytest tests/test_romeo_prompt_contract.py -q
