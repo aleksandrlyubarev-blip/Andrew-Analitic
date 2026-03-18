@@ -57,12 +57,12 @@ Moltis (a Rust runtime) provides the delivery layer: messaging channels (Telegra
 
 ```bash
 # 1. Clone
-git clone https://github.com/YOUR_ORG/andrew-swarm.git
-cd andrew-swarm
+git clone https://github.com/aleksandrlyubarev-blip/Andrew-Analitic.git
+cd Andrew-Analitic
 
 # 2. Configure
-cp config/.env.example .env
-# Edit .env — add at least one LLM API key
+cp .env.example .env
+# Edit .env — set MOLTIS_PASSWORD and at least one LLM API key
 
 # 3. Launch  (builds frontend automatically via multi-stage Dockerfile)
 docker compose up -d
@@ -178,7 +178,7 @@ The following guardrails are implemented and covered by the adversarial test sui
 ## Project Structure
 
 ```
-andrew-swarm/
+Andrew-Analitic/
   core/
     andrew_swarm.py       # LangGraph analytical engine
     semantic_router.py    # Semantic routing + ProceduralStore
@@ -211,6 +211,7 @@ andrew-swarm/
   docker-compose.yml
   Dockerfile              # Multi-stage: Node builds UI, Python serves it
   requirements.txt
+  .env.example            # Copy to .env to configure
   README.md
   LICENSE
 ```

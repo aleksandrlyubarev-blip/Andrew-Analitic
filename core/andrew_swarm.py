@@ -157,42 +157,25 @@ class AndrewResult:
 
 
 # ============================================================
-# 2. MODEL REGISTRY & PROVIDER ADAPTER
+# 2. MODEL REGISTRY, PROVIDER ADAPTER & ROUTER
 # ============================================================
+# Extracted to core/routing.py for testability.
+# Re-exported here so existing imports keep working.
 
-MODEL_REGISTRY = {
-    "reasoning_math": os.getenv("MODEL_REASONING_MATH", "grok-4"),
-    "default_orchestrator": os.getenv("MODEL_ORCHESTRATOR", "anthropic/claude-sonnet-4-20250514"),
-    "default_python": os.getenv("MODEL_PYTHON", "anthropic/claude-sonnet-4-20250514"),
-    "analytics_fastlane": os.getenv("MODEL_ANALYTICS", "gpt-4o-mini"),
-    "sql_generation": os.getenv("MODEL_SQL", "gpt-4o-mini"),
-}
-
-
-def build_model_params(model_name: str) -> dict:
-    """
-    Provider-specific parameter adapter.
-    Different models support different params — blindly passing
-    the same bundle causes errors (e.g., Grok rejects 'effort').
-    """
-    name = (model_name or "").lower()
-
-    if "grok" in name:
-        # xAI reasoning models: limited parameter support
-        return {"temperature": 0.2}
-
-    if "claude" in name:
-        return {"temperature": 0.0}
-
-    if "gpt" in name or "openai" in name:
-        return {"temperature": 0.0}
-
-    # Fallback for unknown providers
-    return {"temperature": 0.2}
+from core.routing import (  # noqa: F401
+    MODEL_REGISTRY,
+    build_model_params,
+    MATH_KEYWORDS,
+    LIGHT_ANALYTICS_TERMS,
+    HEAVY_ML_TERMS,
+    _normalize,
+    _match_keywords,
+    route_query_intent,
+)
 
 
 # ============================================================
-# 3. WEIGHTED QUERY ROUTER (Sprint 4)
+# 3. (Routing section moved to core/routing.py)
 # ============================================================
 
 # Weights: 1=basic analytics, 2=intermediate stats, 3=advanced, 4=heavy ML/math

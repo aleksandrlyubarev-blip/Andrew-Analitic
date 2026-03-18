@@ -1,14 +1,14 @@
 """
-Andrew Swarm — Moltis Bridge v1.0.0-rc1
-====================================================
-Connects Andrew's LangGraph analytical brain to Moltis's Rust runtime.
+bridge/moltis_bridge.py
+=======================
+Thin compatibility shim and uvicorn entry point.
 
-Moltis provides the "hands":
-  - Channels: Telegram, Discord, Web UI (port 13131)
-  - Sandbox: Docker/Podman per-session container isolation
-  - Memory: Hybrid vector + full-text search (SQLite)
-  - Scheduling: Cron + heartbeat for recurring analytics
-  - GraphQL API: /graphql with subscriptions
+The bridge has been split into focused modules:
+  bridge/client.py   — MoltisConfig + MoltisClient (HTTP/GraphQL)
+  bridge/schemas.py  — Pydantic request/response models
+  bridge/service.py  — AndrewMoltisBridge orchestration
+  bridge/hitl.py     — Human-in-the-loop gate
+  bridge/api.py      — FastAPI app, endpoints, rate limiting, utils, CLI
 
 Andrew provides the "brain":
   - Semantic routing (embedding cosine scoring, Capability Registry, Sprint 5)
@@ -1188,37 +1188,4 @@ volumes:
 # ============================================================
 
 if __name__ == "__main__":
-    import sys
-
-    if len(sys.argv) > 1 and sys.argv[1] == "generate-hook":
-        print(generate_moltis_hook_config())
-        sys.exit(0)
-
-    if len(sys.argv) > 1 and sys.argv[1] == "generate-compose":
-        print(generate_docker_compose())
-        sys.exit(0)
-
-    if len(sys.argv) > 1 and sys.argv[1] == "test":
-        # Quick integration test
-        async def _test():
-            bridge = AndrewMoltisBridge()
-            health = await bridge.moltis.health_check()
-            print(f"Moltis health: {health}")
-
-            if health.get("status") != "unreachable":
-                result = await bridge.handle_query("What is the total revenue by region?")
-                print(f"\nResult: {json.dumps(result, indent=2, default=str)}")
-            else:
-                print("\nMoltis not running. Start with: docker compose up -d")
-
-            await bridge.close()
-
-        asyncio.run(_test())
-        sys.exit(0)
-
-    # Default: run the bridge server
-    import uvicorn
-    port = int(os.getenv("BRIDGE_PORT", "8100"))
-    logger.info(f"Starting Andrew-Moltis bridge on port {port}")
-    logger.info(f"Moltis expected at {MoltisConfig.from_env().base_url}")
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+    main()
