@@ -1,5 +1,5 @@
 """
-Andrew Swarm — Moltis Bridge v1.0.0-rc1
+Andrew Swarm — Moltis Bridge v1.4.0
 ====================================================
 Connects Andrew's LangGraph analytical brain to Moltis's Rust runtime.
 
@@ -43,9 +43,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+from app_version import APP_VERSION
 
 logging.basicConfig(level=logging.INFO, format="%(name)s | %(levelname)s | %(message)s")
 logger = logging.getLogger("moltis_bridge")
@@ -724,7 +726,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Andrew Swarm — Moltis Bridge",
-    version="1.4.0",
+    version=APP_VERSION,
     description="Connects Andrew's analytical brain to Moltis's Rust runtime",
     lifespan=lifespan,
 )

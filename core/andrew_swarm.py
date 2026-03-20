@@ -1,5 +1,5 @@
 """
-Andrew Swarm Core v1.0.0-rc1
+Andrew Swarm Core v1.4.0
 ===================================================
 Single-file drop-in: state → routing → intent → SQL → validate → execute
 → Python → AST safety → sandbox → Pandera → semantic guardrails → finalize
@@ -33,6 +33,8 @@ from langgraph.graph import START, END, StateGraph
 from langgraph.types import RetryPolicy
 from litellm import completion, completion_cost
 from sqlalchemy import create_engine, text
+
+from app_version import APP_VERSION
 
 logging.basicConfig(level=logging.INFO, format="%(name)s | %(levelname)s | %(message)s")
 logger = logging.getLogger("andrew")
@@ -1235,7 +1237,7 @@ class AndrewExecutor:
         return self._schema
 
     def execute(self, goal: str) -> AndrewResult:
-        logger.info(f"Andrew Swarm v1.0.0-rc1 | {goal[:80]}")
+        logger.info(f"Andrew Swarm v{APP_VERSION} | {goal[:80]}")
         state = langgraph_executor.invoke({
             "user_request": goal, "goal": goal,
             "schema_context": self.schema, "db_url": self.db_url,
@@ -1263,7 +1265,7 @@ if __name__ == "__main__":
         query = " ".join(sys.argv[1:])
         db_url = os.getenv("DATABASE_URL", "")
         print("=" * 70)
-        print(f"ANDREW SWARM v1.0.0-rc1 — LIVE QUERY")
+        print(f"ANDREW SWARM v{APP_VERSION} — LIVE QUERY")
         print(f"DB: {db_url or '(none)'}")
         print("=" * 70)
         executor = AndrewExecutor(db_url=db_url or None)

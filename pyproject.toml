@@ -4,7 +4,7 @@ build-backend = "setuptools.backends._legacy:_Backend"
 
 [project]
 name = "andrew-swarm"
-version = "1.0.0rc1"
+version = "1.4.0"
 description = "Data science AI agent: hardened analytics, budget-aware routing, Moltis-powered delivery"
 requires-python = ">=3.11"
 license = {text = "MIT"}
