@@ -1,2 +1,5 @@
 """Andrew Swarm Core — LangGraph analytical engine."""
-__version__ = "1.0.0-rc1"
+
+from app_version import APP_VERSION
+
+__version__ = APP_VERSION
