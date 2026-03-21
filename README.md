@@ -149,6 +149,31 @@ curl -X POST http://localhost:8100/scene/ops \
   }'
 ```
 
+## Public SceneOps Deploy
+
+For RomeoFlexVision, the smallest useful public backend is the SceneOps seam:
+
+- `GET /scene/ops`
+- `POST /scene/ops`
+
+This repo now includes [render.yaml](render.yaml) so you can deploy that seam as a public HTTPS service on Render without wiring the full Moltis stack first.
+
+Suggested path:
+
+1. Create a new Render Blueprint from this repository.
+2. Deploy the `andrew-sceneops` web service from `render.yaml`.
+3. Copy the public URL Render gives you, for example:
+   `https://andrew-sceneops.onrender.com/scene/ops`
+4. In the `RomeoFlexVision` GitHub repository, add the secret:
+   `VITE_SCENE_OPS_URL=https://andrew-sceneops.onrender.com/scene/ops`
+5. Re-run the GitHub Pages deploy workflow or push a new commit to `main`.
+
+Important:
+
+- `GET /scene/ops` currently serves the deterministic SceneOps snapshot used for frontend integration.
+- This is enough to switch production off the frontend mock path.
+- A persisted scene-state store can be added later without changing the frontend contract.
+
 ### Local development
 
 ```bash

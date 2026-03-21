@@ -6,9 +6,11 @@ import os
 import sys
 
 import pytest
+from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from bridge.api import app
 from bridge.scene_ops import PinoCutSceneOpsAggregator, build_demo_scene_ops_request
 from bridge.schemas import SceneOpsAggregateRequest
 from bridge.service import AndrewMoltisBridge
@@ -120,3 +122,15 @@ def test_demo_scene_ops_request_matches_frontend_contract():
     assert request.scene_id == "scene_03"
     assert request.used_clips == ["c04", "c02", "c07", "c01", "c05"]
     assert request.bridge_jobs[0]["job_type"] == "bridge_shot"
+
+
+def test_scene_ops_get_allows_romeoflexvision_origin():
+    client = TestClient(app)
+
+    response = client.get(
+        "/scene/ops",
+        headers={"Origin": "https://romeoflexvision.com"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "https://romeoflexvision.com"

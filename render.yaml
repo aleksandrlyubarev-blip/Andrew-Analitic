@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: andrew-sceneops
+    runtime: python
+    plan: starter
+    autoDeploy: true
+    rootDir: .
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn bridge.api:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /scene/ops
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: HITL_ENABLED
+        value: "false"
+      - key: CORS_ALLOW_ORIGINS
+        value: https://romeoflexvision.com,https://www.romeoflexvision.com,http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,http://127.0.0.1:4173
