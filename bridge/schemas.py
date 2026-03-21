@@ -82,3 +82,64 @@ class SceneReviewResponse(BaseModel):
     formatted_message: str
     hitl_decision: str = "skipped"
     hitl_review_id: Optional[str] = None
+
+
+class SceneOpsBassitoJobInput(BaseModel):
+    job_id: Optional[str] = None
+    job_type: str
+    status: str = "queued"
+    source_clip_id: Optional[str] = None
+    artifact_path: Optional[str] = None
+    request_path: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class SceneOpsAggregateRequest(SceneReviewRequest):
+    bassito_jobs: List[SceneOpsBassitoJobInput] = Field(default_factory=list)
+    updated_at: Optional[str] = None
+
+
+class SceneOpsClipScore(BaseModel):
+    visualQuality: int
+    continuityFit: int
+    promptMatch: int
+    motionStability: int
+    timelineUsefulness: int
+    recommendedAction: str = "keep"
+
+
+class SceneOpsSceneBundle(BaseModel):
+    sceneId: str
+    sceneGoal: str
+    editingTemplate: str
+    targetDurationSec: float
+    actualDurationSec: float
+    usedClips: List[str] = Field(default_factory=list)
+    rejectedClips: List[str] = Field(default_factory=list)
+    queueState: str
+
+
+class SceneOpsAndrewReview(BaseModel):
+    confidence: float
+    summary: str
+    warnings: List[str] = Field(default_factory=list)
+    recommendedActions: List[str] = Field(default_factory=list)
+    qualityBreakdown: Dict[str, float] = Field(default_factory=dict)
+    hitlDecision: str = "skipped"
+
+
+class SceneOpsBassitoJob(BaseModel):
+    jobId: str
+    jobType: str
+    status: str
+    sourceClipId: Optional[str] = None
+    artifactPath: Optional[str] = None
+
+
+class SceneOpsSnapshotResponse(BaseModel):
+    scene: SceneOpsSceneBundle
+    clipScores: Dict[str, SceneOpsClipScore] = Field(default_factory=dict)
+    andrew: SceneOpsAndrewReview
+    bassitoJobs: List[SceneOpsBassitoJob] = Field(default_factory=list)
+    updatedAt: str
+    source: str = "api"

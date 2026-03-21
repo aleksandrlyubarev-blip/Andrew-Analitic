@@ -48,6 +48,7 @@ class AndrewMoltisBridge:
         self.store_results = store_results_in_memory
         self._andrew_executor = None
         self._scene_reviewer = None
+        self._scene_ops_aggregator = None
         self._db_url = andrew_db_url or os.getenv("DATABASE_URL", "")
         self.hitl = HitlGate()
 
@@ -67,6 +68,15 @@ class AndrewMoltisBridge:
             self._scene_reviewer = PinoCutSceneReviewer()
             logger.info("PinoCut scene reviewer initialized")
         return self._scene_reviewer
+
+    def _get_scene_ops_aggregator(self):
+        """Lazy-load the frontend-facing SceneOps aggregator."""
+        if self._scene_ops_aggregator is None:
+            from bridge.scene_ops import PinoCutSceneOpsAggregator
+
+            self._scene_ops_aggregator = PinoCutSceneOpsAggregator(self._get_scene_reviewer())
+            logger.info("SceneOps aggregator initialized")
+        return self._scene_ops_aggregator
 
     async def handle_query(self, query: str, context: Optional[Dict] = None) -> Dict[str, Any]:
         """
@@ -184,9 +194,34 @@ class AndrewMoltisBridge:
         """
         from bridge.schemas import SceneReviewRequest
 
+        request = SceneReviewRequest(**scene_payload)
+        response = await self._run_scene_review(request, context=context)
+        response["formatted_message"] = self._format_scene_review_for_channel(response)
+        return response
+
+    async def handle_scene_ops(
+        self,
+        scene_payload: Dict[str, Any],
+        context: Optional[Dict] = None,
+    ) -> Dict[str, Any]:
+        """
+        Aggregate PinoCut scene data, Andrew review, and Bassito job state into
+        the frontend-facing SceneOps snapshot used by RomeoFlexVision.
+        """
+        from bridge.schemas import SceneOpsAggregateRequest
+
+        request = SceneOpsAggregateRequest(**scene_payload)
+        review = await self._run_scene_review(request, context=context)
+        aggregator = self._get_scene_ops_aggregator()
+        return aggregator.build_snapshot(request, review=review)
+
+    async def _run_scene_review(
+        self,
+        request,
+        context: Optional[Dict] = None,
+    ) -> Dict[str, Any]:
         channel = (context or {}).get("channel", "api")
         start_time = time.time()
-        request = SceneReviewRequest(**scene_payload)
         reviewer = self._get_scene_reviewer()
         response = reviewer.review(request)
         response["elapsed_seconds"] = round(time.time() - start_time, 2)
@@ -211,7 +246,6 @@ class AndrewMoltisBridge:
         if hitl_outcome.decision == "reject":
             response["success"] = False
 
-        response["formatted_message"] = self._format_scene_review_for_channel(response)
         return response
 
     def _format_for_channel(self, response: Dict) -> str:

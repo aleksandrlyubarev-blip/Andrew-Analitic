@@ -23,10 +23,13 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from bridge.client import MoltisConfig
+from bridge.scene_ops import build_demo_scene_ops_request
 from bridge.schemas import (
     AnalyzeRequest,
     AnalyzeResponse,
     HealthResponse,
+    SceneOpsAggregateRequest,
+    SceneOpsSnapshotResponse,
     SceneReviewRequest,
     SceneReviewResponse,
     ScheduleRequest,
@@ -112,6 +115,55 @@ async def review_scene(request: Request, req: SceneReviewRequest):
     result = await bridge.handle_scene_review(req.model_dump(), context={"channel": "api"})
     return SceneReviewResponse(
         **{k: v for k, v in result.items() if k in SceneReviewResponse.model_fields}
+    )
+
+
+@app.post("/scene/ops", response_model=SceneOpsSnapshotResponse)
+@limiter.limit("10/minute")
+async def aggregate_scene_ops(request: Request, req: SceneOpsAggregateRequest):
+    """
+    Aggregate a frontend-ready SceneOps snapshot for RomeoFlexVision.
+
+    This contract adapts PinoCut scene state, Andrew QA, and Bassito job status
+    into one response model that the React frontend can render directly.
+    """
+    bridge = get_bridge()
+    result = await bridge.handle_scene_ops(req.model_dump(), context={"channel": "api"})
+    return SceneOpsSnapshotResponse(
+        **{k: v for k, v in result.items() if k in SceneOpsSnapshotResponse.model_fields}
+    )
+
+
+@app.get("/scene/ops", response_model=SceneOpsSnapshotResponse)
+async def get_scene_ops():
+    """
+    Stable GET seam for RomeoFlexVision.
+
+    Until a persisted scene-state store is imported into this repo, this route
+    returns the deterministic demo snapshot used for frontend integration.
+    """
+    bridge = get_bridge()
+    result = await bridge.handle_scene_ops(
+        build_demo_scene_ops_request().model_dump(),
+        context={"channel": "api"},
+    )
+    return SceneOpsSnapshotResponse(
+        **{k: v for k, v in result.items() if k in SceneOpsSnapshotResponse.model_fields}
+    )
+
+
+@app.get("/scene/ops/demo", response_model=SceneOpsSnapshotResponse)
+async def demo_scene_ops():
+    """
+    Deterministic demo snapshot for frontend wiring and design review.
+    """
+    bridge = get_bridge()
+    result = await bridge.handle_scene_ops(
+        build_demo_scene_ops_request().model_dump(),
+        context={"channel": "api"},
+    )
+    return SceneOpsSnapshotResponse(
+        **{k: v for k, v in result.items() if k in SceneOpsSnapshotResponse.model_fields}
     )
 
 
