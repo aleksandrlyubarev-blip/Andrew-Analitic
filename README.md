@@ -80,6 +80,36 @@ curl -X POST http://localhost:8100/educate \
   -d '{"question": "What is gradient descent?"}'
 ```
 
+Andrew can also review a scene bundle exported by PinoCut / Pinnocat:
+
+```bash
+curl -X POST http://localhost:8100/scene/review \
+  -H "Content-Type: application/json" \
+  -d '{
+    "project_id": "rfv_pinnocat_001",
+    "scene_id": "scene_03",
+    "scene_goal": "arrival at abandoned spaceport",
+    "style_profile": "cinematic dark sci-fi",
+    "editing_mode": "hybrid",
+    "editing_template": "cinematic_montage",
+    "target_duration_sec": 35,
+    "actual_duration_sec": 32.8,
+    "used_clips": ["c04", "c02", "c07"],
+    "rejected_clips": ["c03"],
+    "clip_scores": {
+      "c04": {
+        "visual_quality": 4,
+        "continuity_fit": 5,
+        "prompt_match": 4,
+        "motion_stability": 3,
+        "timeline_usefulness": 5
+      }
+    },
+    "bridge_jobs": [],
+    "regeneration_jobs": []
+  }'
+```
+
 ### Local development
 
 ```bash
@@ -169,6 +199,7 @@ The following guardrails are implemented and covered by the adversarial test sui
 | `GET` | `/docs` | Interactive OpenAPI / Swagger UI |
 | `POST` | `/analyze` | Submit analytical query (Andrew) |
 | `POST` | `/educate` | Ask an educational question (Romeo PhD) |
+| `POST` | `/scene/review` | Review a PinoCut scene bundle (Andrew QA + optional HITL) |
 | `POST` | `/webhook/moltis` | Moltis hook receiver (filters for analytical intent) |
 | `POST` | `/schedule` | Create recurring analysis (cron) |
 | `GET` | `/schedule` | List scheduled jobs |

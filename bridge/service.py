@@ -47,6 +47,7 @@ class AndrewMoltisBridge:
         self.moltis = MoltisClient(moltis_config)
         self.store_results = store_results_in_memory
         self._andrew_executor = None
+        self._scene_reviewer = None
         self._db_url = andrew_db_url or os.getenv("DATABASE_URL", "")
         self.hitl = HitlGate()
 
@@ -57,6 +58,15 @@ class AndrewMoltisBridge:
             self._andrew_executor = SwarmSupervisor(db_url=self._db_url)
             logger.info("SwarmSupervisor v1.0.0 initialized (Andrew + Romeo)")
         return self._andrew_executor
+
+    def _get_scene_reviewer(self):
+        """Lazy-load the deterministic PinoCut scene reviewer."""
+        if self._scene_reviewer is None:
+            from bridge.pinocut_review import PinoCutSceneReviewer
+
+            self._scene_reviewer = PinoCutSceneReviewer()
+            logger.info("PinoCut scene reviewer initialized")
+        return self._scene_reviewer
 
     async def handle_query(self, query: str, context: Optional[Dict] = None) -> Dict[str, Any]:
         """
@@ -161,6 +171,49 @@ class AndrewMoltisBridge:
         )
         return response
 
+    async def handle_scene_review(
+        self,
+        scene_payload: Dict[str, Any],
+        context: Optional[Dict] = None,
+    ) -> Dict[str, Any]:
+        """
+        Review a PinoCut scene bundle and return Andrew-style QA output.
+
+        This path is deterministic and uses the existing HITL gate for
+        low-confidence scene reviews.
+        """
+        from bridge.schemas import SceneReviewRequest
+
+        channel = (context or {}).get("channel", "api")
+        start_time = time.time()
+        request = SceneReviewRequest(**scene_payload)
+        reviewer = self._get_scene_reviewer()
+        response = reviewer.review(request)
+        response["elapsed_seconds"] = round(time.time() - start_time, 2)
+        response["agent_used"] = "andrew_scene_review"
+        response["routing"] = "pinocut_scene_review"
+        response["channel"] = channel
+
+        hitl_outcome = await self.hitl.check(
+            query=f"Review scene {request.scene_id}: {request.scene_goal}",
+            output=response["summary"],
+            confidence=response["confidence"],
+            routing=response["routing"],
+            agent_used=response["agent_used"],
+            warnings=response["warnings"],
+            cost_usd=0.0,
+            sql_query=None,
+        )
+        response["summary"] = hitl_outcome.output
+        response["warnings"] = hitl_outcome.warnings
+        response["hitl_decision"] = hitl_outcome.decision
+        response["hitl_review_id"] = hitl_outcome.review_id
+        if hitl_outcome.decision == "reject":
+            response["success"] = False
+
+        response["formatted_message"] = self._format_scene_review_for_channel(response)
+        return response
+
     def _format_for_channel(self, response: Dict) -> str:
         """Format output for messaging channels (Telegram/Discord ~4000 char limit)."""
         parts = []
@@ -184,6 +237,43 @@ class AndrewMoltisBridge:
             f"\n_Cost: ${response.get('cost_usd', 0):.4f} | "
             f"Time: {response.get('elapsed_seconds', 0)}s | "
             f"Route: {response.get('routing', '?')}_"
+        )
+        return "\n".join(parts)
+
+    def _format_scene_review_for_channel(self, response: Dict[str, Any]) -> str:
+        """Format a PinoCut scene review for Telegram/Discord/Web delivery."""
+        parts = [
+            f"**Scene Review** `{response.get('scene_id', '?')}` "
+            f"(confidence: {response.get('confidence', 0):.0%})",
+            response.get("summary", ""),
+        ]
+
+        recommended_actions = response.get("recommended_actions", [])
+        if recommended_actions:
+            parts.append("\n**Recommended actions:**")
+            for action in recommended_actions[:5]:
+                parts.append(f"- {action}")
+
+        warnings = response.get("warnings", [])
+        if warnings:
+            parts.append("\n**Warnings:**")
+            for warning in warnings[:5]:
+                parts.append(f"- {warning}")
+
+        breakdown = response.get("quality_breakdown", {})
+        if breakdown:
+            parts.append(
+                "\n_"
+                + " | ".join(
+                    f"{key.replace('_', ' ')}: {value:.1f}/5"
+                    for key, value in breakdown.items()
+                )
+                + "_"
+            )
+
+        parts.append(
+            f"\n_Route: {response.get('routing', '?')} | "
+            f"Time: {response.get('elapsed_seconds', 0)}s_"
         )
         return "\n".join(parts)
 

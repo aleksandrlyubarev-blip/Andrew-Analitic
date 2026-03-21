@@ -23,7 +23,14 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from bridge.client import MoltisConfig
-from bridge.schemas import AnalyzeRequest, AnalyzeResponse, HealthResponse, ScheduleRequest
+from bridge.schemas import (
+    AnalyzeRequest,
+    AnalyzeResponse,
+    HealthResponse,
+    SceneReviewRequest,
+    SceneReviewResponse,
+    ScheduleRequest,
+)
 from bridge.service import AndrewMoltisBridge
 
 logger = logging.getLogger("bridge_api")
@@ -91,6 +98,21 @@ async def analyze(request: Request, req: AnalyzeRequest):
         context={"channel": req.channel, "user_id": req.user_id, "session_id": req.session_id},
     )
     return AnalyzeResponse(**{k: v for k, v in result.items() if k in AnalyzeResponse.model_fields})
+
+
+@app.post("/scene/review", response_model=SceneReviewResponse)
+@limiter.limit("10/minute")
+async def review_scene(request: Request, req: SceneReviewRequest):
+    """
+    Review a PinoCut scene bundle and return Andrew-style QA output.
+
+    Intended for Pinnocat / PinoCut scene-level validation before final export.
+    """
+    bridge = get_bridge()
+    result = await bridge.handle_scene_review(req.model_dump(), context={"channel": "api"})
+    return SceneReviewResponse(
+        **{k: v for k, v in result.items() if k in SceneReviewResponse.model_fields}
+    )
 
 
 @app.post("/webhook/moltis")
