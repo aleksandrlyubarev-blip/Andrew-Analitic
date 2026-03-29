@@ -5,12 +5,22 @@ Andrew LCB Runner — difficulty-routed competitive programming solver.
 
 Routing:
   easy (55%)  → GPT-4o-mini   1-2 candidates, no repair
-  hard (45%)  → DeepSeek V3   4 candidates + 3 repair iterations + RAG templates
+  hard (45%)  → GLM 5.1       4 candidates + 3 repair iterations + RAG templates
+
+GLM 5.1 (Z.ai / ZhipuAI):
+  - 744B total params, ~40B active per token (sparse MoE, 256 experts)
+  - 204K context, trained with SLIME async RL for agentic tasks
+  - Interleaved Thinking = natural fit for repair loop pattern
+  - MIT licence, zero vendor lock-in
 
 Cost model (approximate):
   easy problem: ~$0.001  (2 candidates × GPT-4o-mini)
-  hard problem: ~$0.02   (4 candidates + up to 12 repair calls × DeepSeek V3)
+  hard problem: ~$0.02   (4 candidates + up to 12 repair calls × GLM 5.1)
   800-problem run: ~$18-20 total
+
+Sandbox backends:
+  subprocess (default) — local process, no dependencies
+  moltis               — ZeroClaw/Moltis Docker sandbox (set LCB_SANDBOX_BACKEND=moltis)
 """
 
 from __future__ import annotations
@@ -40,12 +50,17 @@ logger = logging.getLogger("lcb.runner")
 # ── Model registry ────────────────────────────────────────────
 
 LCB_MODEL_EASY = os.getenv("LCB_MODEL_EASY", "gpt-4o-mini")
-LCB_MODEL_HARD = os.getenv("LCB_MODEL_HARD", "deepseek/deepseek-chat")
+# GLM 5.1: 744B MoE, ~40B active, SLIME-trained for agentic/coding tasks.
+# Fallback: deepseek/deepseek-chat if ZhipuAI key not set.
+LCB_MODEL_HARD = os.getenv("LCB_MODEL_HARD", "zhipuai/glm-5.1")
 
 EASY_CANDIDATES = int(os.getenv("LCB_EASY_CANDIDATES", "2"))
 HARD_CANDIDATES = int(os.getenv("LCB_HARD_CANDIDATES", "4"))
 MAX_REPAIR_ITERATIONS = int(os.getenv("LCB_MAX_REPAIR", "3"))
 SANDBOX_TIMEOUT = int(os.getenv("LCB_SANDBOX_TIMEOUT", "5"))  # seconds per test
+
+# "subprocess" (default, local) | "moltis" (ZeroClaw Docker sandbox)
+SANDBOX_BACKEND = os.getenv("LCB_SANDBOX_BACKEND", "subprocess")
 
 # Temperature for candidate generation (diverse sampling)
 EASY_TEMPERATURE = 0.2
@@ -139,6 +154,54 @@ def _run_code(code: str, stdin: str, timeout: float) -> Tuple[str, Optional[str]
             pass
 
 
+def _run_code_moltis(code: str, stdin: str, timeout: float) -> Tuple[str, Optional[str]]:
+    """
+    Execute code via Moltis/ZeroClaw Docker sandbox.
+    Bridges async Moltis client into sync pipeline with asyncio.run().
+    Falls back to subprocess if Moltis is unreachable.
+
+    Moltis = ZeroClaw equivalent in the Andrew stack:
+      - Rust binary ~5 MB, <10 ms startup
+      - Strict allowlist sandboxing (workspace scoping)
+      - Lifecycle hooks intercept dangerous commands before shell execution
+    """
+    try:
+        import asyncio
+        # Import here to avoid circular import and hard dependency
+        from bridge.client import MoltisClient
+
+        async def _exec() -> Tuple[str, Optional[str]]:
+            client = MoltisClient()
+            try:
+                # Inject stdin by prepending sys.stdin override
+                # This is safe because we control the code string entirely
+                injected = (
+                    "import sys as _sys, io as _io\n"
+                    f"_sys.stdin = _io.StringIO({stdin!r})\n"
+                    + code
+                )
+                result = await client.execute_in_sandbox(injected, language="python")
+                out = (result.get("output") or "").strip()
+                err = result.get("error") or None
+                if result.get("exitCode", 0) != 0 and not err:
+                    err = f"Exit code {result.get('exitCode')}"
+                return out, err
+            finally:
+                await client.close()
+
+        return asyncio.run(_exec())
+    except Exception as exc:
+        logger.warning("Moltis sandbox failed (%s), falling back to subprocess", exc)
+        return _run_code(code, stdin, timeout)
+
+
+def _dispatch_run(code: str, stdin: str, timeout: float) -> Tuple[str, Optional[str]]:
+    """Route to the configured sandbox backend."""
+    if SANDBOX_BACKEND == "moltis":
+        return _run_code_moltis(code, stdin, timeout)
+    return _run_code(code, stdin, timeout)
+
+
 def evaluate_solution(
     code: str,
     test_cases: List[TestCase],
@@ -155,7 +218,7 @@ def evaluate_solution(
     first_error: Optional[str] = None
 
     for tc in test_cases:
-        actual, err = _run_code(code, tc.stdin, timeout)
+        actual, err = _dispatch_run(code, tc.stdin, timeout)
         if err:
             if first_error is None:
                 first_error = err

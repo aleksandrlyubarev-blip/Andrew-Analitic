@@ -54,6 +54,9 @@ from .runner import (
     LCB_MODEL_EASY, LCB_MODEL_HARD,
     EASY_TEMPERATURE, HARD_TEMPERATURE, MAX_REPAIR_ITERATIONS,
 )
+
+# Parallel candidate generation (SLIME-style async — each candidate independent)
+_PARALLEL_CANDIDATES = os.getenv("LCB_PARALLEL_CANDIDATES", "true").lower() == "true"
 from .state import LCBState
 
 logger = logging.getLogger("lcb.pipeline")
@@ -227,11 +230,34 @@ def node_generate_self_tests(state: LCBState) -> LCBState:
     }
 
 
+def _build_prompt_for_strategy(
+    strategy: str,
+    problem: LCBProblem,
+    hints: List[str],
+    template_context: str,
+    constraints_summary: str,
+) -> str:
+    """Build a generation prompt for the given strategy."""
+    if strategy == "direct":
+        return build_direct_prompt(problem, template_context, constraints_summary)
+    elif strategy == "plan_then_code":
+        return build_plan_then_code_prompt(
+            problem, hints, template_context, constraints_summary
+        )
+    else:  # analogy
+        return build_analogy_prompt(problem, hints, template_context)
+
+
 def node_generate_candidates(state: LCBState) -> LCBState:
     """
     Generate N candidate solutions using different prompt strategies.
+
     easy: 2 direct candidates (GPT-4o-mini, cheap)
-    hard: 4 candidates — direct×2, plan_then_code, analogy (DeepSeek V3)
+    hard: 4 candidates — direct×2, plan_then_code, analogy (GLM 5.1)
+
+    When LCB_PARALLEL_CANDIDATES=true (default), candidates are generated
+    concurrently via ThreadPoolExecutor — mirrors SLIME async RL philosophy:
+    independent rollouts don't block each other.
     """
     problem: LCBProblem = state["problem"]
     difficulty = state.get("difficulty", "hard")
@@ -240,47 +266,71 @@ def node_generate_candidates(state: LCBState) -> LCBState:
     template_context = state.get("template_context", "")
     hints = state.get("algorithm_hints", [])
     complexity = state.get("time_complexity_target", "")
+    n_max = state.get("constraints", {}).get("n_max", 0)
     constraints_summary = (
-        f"N ≤ {state.get('constraints', {}).get('n_max', '?'):,}, "
-        f"target {complexity}, structure={state.get('constraints', {}).get('structure', '?')}"
+        f"N ≤ {n_max:,}, target {complexity}, "
+        f"structure={state.get('constraints', {}).get('structure', '?')}"
+        if n_max else f"target {complexity}"
     )
 
+    if not _budget_ok(state):
+        logger.warning("[candidates] budget exceeded, skipping generation")
+        return {**state, "candidates": [], "candidate_strategies": []}
+
     strategies = CANDIDATE_PLAN[difficulty]
-    candidates: List[str] = []
-    strategies_used: List[str] = []
-    cost = state.get("cost_usd", 0.0)
 
-    for strategy in strategies:
-        if not _budget_ok({**state, "cost_usd": cost}):
-            logger.warning("[candidates] budget exceeded at candidate %d", len(candidates))
-            break
-
-        if strategy == "direct":
-            prompt = build_direct_prompt(problem, template_context, constraints_summary)
-        elif strategy == "plan_then_code":
-            prompt = build_plan_then_code_prompt(
-                problem, hints, template_context, constraints_summary
-            )
-        else:  # analogy
-            prompt = build_analogy_prompt(problem, hints, template_context)
-
+    def _generate_one(strategy: str) -> Tuple[str, str, float]:
+        """Returns (code, strategy, cost). Empty code on failure."""
+        prompt = _build_prompt_for_strategy(
+            strategy, problem, hints, template_context, constraints_summary
+        )
         try:
             code, resp = _llm(model, SYSTEM_PROMPT, prompt, temperature=temperature)
-            cost += _track_cost(resp, {**state, "cost_usd": 0.0})
-            candidates.append(code)
-            strategies_used.append(strategy)
-            logger.info("[candidates] %s → %d tokens (strategy=%s)",
-                        problem.problem_id, len(code.split()), strategy)
+            cost = _track_cost(resp, {"cost_usd": 0.0})
+            return code, strategy, cost
         except Exception as exc:
             logger.warning("[candidates] strategy=%s failed: %s", strategy, exc)
+            return "", strategy, 0.0
 
+    candidates: List[str] = []
+    strategies_used: List[str] = []
+    total_cost = state.get("cost_usd", 0.0)
+
+    if _PARALLEL_CANDIDATES and len(strategies) > 1:
+        # Parallel generation: all candidates launch simultaneously (SLIME-style)
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=len(strategies)) as pool:
+            futures = {pool.submit(_generate_one, s): s for s in strategies}
+            for fut in as_completed(futures):
+                code, strategy, cost = fut.result()
+                if code:
+                    candidates.append(code)
+                    strategies_used.append(strategy)
+                    total_cost += cost
+                    logger.info("[candidates] parallel %s → %d tokens",
+                                strategy, len(code.split()))
+    else:
+        # Sequential fallback (easier to debug)
+        for strategy in strategies:
+            code, _, cost = _generate_one(strategy)
+            if code:
+                candidates.append(code)
+                strategies_used.append(strategy)
+                total_cost += cost
+
+    logger.info(
+        "[candidates] %s: %d/%d candidates generated (parallel=%s)",
+        problem.problem_id, len(candidates), len(strategies), _PARALLEL_CANDIDATES,
+    )
     return {
         **state,
         "candidates": candidates,
         "candidate_strategies": strategies_used,
-        "cost_usd": cost,
+        "cost_usd": total_cost,
         "audit_log": _audit(state, "generate_candidates",
-                            n_candidates=len(candidates), strategies=strategies_used),
+                            n_candidates=len(candidates),
+                            strategies=strategies_used,
+                            parallel=_PARALLEL_CANDIDATES),
     }
 
 

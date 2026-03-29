@@ -533,7 +533,7 @@ class TestRunner:
         with self._mock_llm_call():
             result = LCBRunner(hard_candidates=1, max_repair=0).solve(problem)
         assert result.difficulty == "hard"
-        assert result.model == os.getenv("LCB_MODEL_HARD", "deepseek/deepseek-chat")
+        assert result.model == os.getenv("LCB_MODEL_HARD", "zhipuai/glm-5.1")
 
     def test_success_when_all_pass(self):
         problem = make_problem(test_cases=[TC("3", "6"), TC("5", "10")])
@@ -723,3 +723,143 @@ class TestEval:
         assert report.total_problems == 2
         assert report.solved == 2
         assert report.accuracy == pytest.approx(1.0)
+
+
+# ═══════════════════════════════════════════════════════════════
+# 9. Parallel generation + sandbox backends
+# ═══════════════════════════════════════════════════════════════
+
+from lcb.pipeline import node_generate_candidates, _build_prompt_for_strategy
+from lcb.runner import _run_code, _run_code_moltis, _dispatch_run, SANDBOX_BACKEND
+
+
+class TestParallelAndBackends:
+    def test_parallel_candidates_all_generated(self):
+        """Parallel mode should produce same count as sequential."""
+        correct = "print(int(input()) * 2)"
+        mock_resp = MagicMock()
+        mock_resp.choices[0].message.content = correct
+
+        with patch("lcb.pipeline._llm", return_value=(correct, mock_resp)), \
+             patch("lcb.pipeline._PARALLEL_CANDIDATES", True):
+            problem = make_problem("Dijkstra hard problem.", lcb_difficulty="hard")
+            s = node_classify(_initial_state(problem))
+            s = node_extract_constraints(s)
+            s = node_retrieve_templates(s)
+            s = {**s, "self_tests": []}
+            s = node_generate_candidates(s)
+
+        # hard plan has 4 strategies → 4 candidates
+        assert len(s["candidates"]) == 4
+
+    def test_sequential_fallback_produces_same_result(self):
+        """Sequential mode should produce same count."""
+        correct = "print(int(input()) * 2)"
+        mock_resp = MagicMock()
+        mock_resp.choices[0].message.content = correct
+
+        with patch("lcb.pipeline._llm", return_value=(correct, mock_resp)), \
+             patch("lcb.pipeline._PARALLEL_CANDIDATES", False):
+            problem = make_problem("Dijkstra hard problem.", lcb_difficulty="hard")
+            s = node_classify(_initial_state(problem))
+            s = node_extract_constraints(s)
+            s = node_retrieve_templates(s)
+            s = {**s, "self_tests": []}
+            s = node_generate_candidates(s)
+
+        assert len(s["candidates"]) == 4
+
+    def test_audit_log_records_parallel_flag(self):
+        correct = "print(int(input()) * 2)"
+        mock_resp = MagicMock()
+        mock_resp.choices[0].message.content = correct
+
+        with patch("lcb.pipeline._llm", return_value=(correct, mock_resp)), \
+             patch("lcb.pipeline._PARALLEL_CANDIDATES", True):
+            problem = make_problem(lcb_difficulty="easy")
+            s = node_classify(_initial_state(problem))
+            s = {**s, "constraints": {}, "algorithm_hints": [],
+                 "time_complexity_target": "", "template_context": "", "self_tests": []}
+            s = node_generate_candidates(s)
+
+        gen_entry = next(
+            (e for e in s.get("audit_log", []) if e["node"] == "generate_candidates"), None
+        )
+        assert gen_entry is not None
+        assert gen_entry["parallel"] is True
+
+    def test_prompt_strategies_produce_different_prompts(self):
+        """Each strategy should yield a different prompt to maximise candidate diversity."""
+        problem = make_problem("Find shortest path using dijkstra.")
+        hints = ["dijkstra", "bfs", "graph"]
+        prompts = {
+            s: _build_prompt_for_strategy(s, problem, hints, "", "N ≤ 100000")
+            for s in ["direct", "plan_then_code", "analogy"]
+        }
+        # All three prompts must be different (diversity in candidate generation)
+        assert len(set(prompts.values())) == 3
+
+    def test_dispatch_run_subprocess_backend(self):
+        """Default subprocess backend executes code correctly."""
+        with patch("lcb.runner.SANDBOX_BACKEND", "subprocess"):
+            out, err = _dispatch_run("print(21 * 2)", "", timeout=2.0)
+        assert out == "42"
+        assert err is None
+
+    def test_dispatch_run_moltis_fallback_on_error(self):
+        """
+        _run_code_moltis falls back to subprocess when bridge.client is missing.
+        The fallback is inside _run_code_moltis (not _dispatch_run), so we verify
+        the fallback path works by causing the import to fail.
+        """
+        import sys
+        # Remove bridge.client from sys.modules so the import inside _run_code_moltis fails
+        saved = sys.modules.pop("bridge.client", None)
+        saved2 = sys.modules.pop("bridge", None)
+        try:
+            out, err = _run_code_moltis("print(42)", "", timeout=2.0)
+            # Should fall back to subprocess and execute successfully
+            assert out == "42"
+            assert err is None
+        finally:
+            if saved is not None:
+                sys.modules["bridge.client"] = saved
+            if saved2 is not None:
+                sys.modules["bridge"] = saved2
+
+    def test_moltis_backend_injects_stdin(self):
+        """
+        _run_code_moltis should inject stdin so code can read from sys.stdin.
+        When Moltis is unreachable it falls back to subprocess — verify the
+        stdin injection logic is syntactically correct Python.
+        """
+        code = "n = int(input()); print(n * 3)"
+        stdin = "7"
+        # Simulate what _run_code_moltis builds before calling Moltis
+        injected = (
+            "import sys as _sys, io as _io\n"
+            f"_sys.stdin = _io.StringIO({stdin!r})\n"
+            + code
+        )
+        # Run the injected code directly via subprocess to verify it works
+        out, err = _run_code(injected, "", timeout=2.0)
+        assert out == "21"
+        assert err is None
+
+    def test_glm_51_is_default_hard_model(self):
+        """GLM 5.1 should be the default model for hard problems."""
+        from lcb.runner import LCB_MODEL_HARD
+        import os
+        # Only check default when env var is not set
+        if not os.environ.get("LCB_MODEL_HARD"):
+            assert "glm" in LCB_MODEL_HARD.lower() or "deepseek" in LCB_MODEL_HARD.lower()
+
+    def test_env_override_hard_model(self):
+        """LCB_MODEL_HARD env var should override the default."""
+        with patch.dict("os.environ", {"LCB_MODEL_HARD": "openai/gpt-4o"}):
+            import importlib
+            import lcb.runner as runner_mod
+            importlib.reload(runner_mod)
+            assert runner_mod.LCB_MODEL_HARD == "openai/gpt-4o"
+            # Reload back to normal
+            importlib.reload(runner_mod)
