@@ -181,6 +181,14 @@ def _run_code_moltis(code: str, stdin: str, timeout: float) -> Tuple[str, Option
                     + code
                 )
                 result = await client.execute_in_sandbox(injected, language="python")
+                # Moltis connectivity failures can be surfaced as an empty payload
+                # when the GraphQL client cannot reach the runtime at all.
+                if not result or (
+                    "output" not in result
+                    and "error" not in result
+                    and "exitCode" not in result
+                ):
+                    raise RuntimeError("Moltis sandbox unavailable")
                 out = (result.get("output") or "").strip()
                 err = result.get("error") or None
                 if result.get("exitCode", 0) != 0 and not err:
