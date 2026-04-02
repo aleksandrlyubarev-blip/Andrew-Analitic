@@ -143,3 +143,79 @@ class SceneOpsSnapshotResponse(BaseModel):
     bassitoJobs: List[SceneOpsBassitoJob] = Field(default_factory=list)
     updatedAt: str
     source: str = "api"
+
+
+# ── LTX 2.3 video generation ──────────────────────────────────────────────────
+
+class LtxKeyframe(BaseModel):
+    """Single anchor keyframe for LTX multi-keyframe or first/last workflow."""
+
+    index: int  # 0 = first, -1 = last, >0 = ordered middle keyframe
+    frame_type: str  # "first" | "last" | "middle"
+    source_prompt: str
+    image_path: Optional[str] = None  # path to a pre-rendered still (Flux/SD3/MJ)
+
+
+class LtxScene(BaseModel):
+    """One parsed scene from a ТЗ/scenario."""
+
+    scene_id: str
+    scene_index: int
+    title: str = ""
+    start_sec: float = 0.0
+    end_sec: float = 0.0
+    duration_sec: float = 0.0
+    visual_prompt: str
+    style: str = ""
+    audio_description: str = ""
+    keyframes: List[LtxKeyframe] = Field(default_factory=list)
+    workflow: str = "first_last"  # "first_last" | "multi_keyframe"
+
+
+class LtxGenerationConfig(BaseModel):
+    """Hardware/quality config for an LTX 2.3 generation run."""
+
+    resolution: str = "1920x1080"
+    aspect_ratio: str = "16:9"  # "16:9" | "9:16"
+    model_variant: str = "fp8"  # "bf16" | "fp8"
+    use_distilled_lora: bool = True
+    vram_budget_gb: int = 12
+    double_upscale: bool = True
+    audio_native: bool = True
+    max_clip_duration_sec: float = 15.0
+    multi_keyframe_threshold_sec: float = 10.0  # scenes longer than this get multi_keyframe
+
+
+class LtxVideoJobRequest(BaseModel):
+    """Input for the LTX scenario-to-jobs pipeline."""
+
+    project_id: str
+    scenario_text: str
+    config: LtxGenerationConfig = Field(default_factory=LtxGenerationConfig)
+
+
+class LtxSceneJob(BaseModel):
+    """ComfyUI-ready job descriptor for a single LTX scene clip."""
+
+    job_id: str
+    scene_id: str
+    scene_index: int
+    job_type: str = "ltx_keyframe"
+    workflow: str  # "first_last" | "multi_keyframe"
+    duration_sec: float
+    prompts: List[str]
+    keyframes: List[LtxKeyframe]
+    model_config_ltx: Dict[str, Any] = Field(default_factory=dict)
+    audio: Dict[str, Any] = Field(default_factory=dict)
+    status: str = "queued"
+
+
+class LtxVideoJobResponse(BaseModel):
+    """Full pipeline output: parsed scenes + ComfyUI job queue."""
+
+    project_id: str
+    total_scenes: int
+    scene_jobs: List[LtxSceneJob] = Field(default_factory=list)
+    comfyui_queue_ready: bool = True
+    estimated_vram_gb: float = 0.0
+    warnings: List[str] = Field(default_factory=list)
