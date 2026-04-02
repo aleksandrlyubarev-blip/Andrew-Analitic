@@ -11,6 +11,7 @@ preferred_model        backend
 sora2 / sora-2         Higgsfield API  → HiggsfieldClient
 wan2.6 / wan-2.6       Higgsfield API  → HiggsfieldClient
 veo3.1 / veo-3.1       Higgsfield API  → HiggsfieldClient
+grok4.2 / grok-4.2     xAI API         → GrokVideoClient
 ltx2.3 / ltx / ""      Local ComfyUI   → ComfyUIClient
 
 All results are normalised to ComfyUISubmitResult so downstream
@@ -24,11 +25,13 @@ from typing import Any
 
 from bridge.comfyui_client import ComfyUIClient
 from bridge.comfyui_export import ComfyUIWorkflowExporter
+from bridge.grok_video_client import GrokVideoClient
 from bridge.higgsfield_client import HiggsfieldClient
 from bridge.schemas import (
     ComfyUIBatchResult,
     ComfyUIJobStatus,
     ComfyUISubmitResult,
+    GrokVideoRequest,
     HiggsfieldGenerationRequest,
     LtxGenerationConfig,
     LtxSceneJob,
@@ -41,6 +44,9 @@ logger = logging.getLogger("video_dispatcher")
 
 # Models that go to Higgsfield
 _HIGGSFIELD_MODELS = frozenset({"sora2", "sora-2", "wan2.6", "wan-2.6", "veo3.1", "veo-3.1"})
+
+# Models that go to xAI Grok
+_GROK_MODELS = frozenset({"grok4.2", "grok-4.2", "grok4", "grok-4"})
 
 # Default guidance scales per model (Higgsfield tuning)
 _MODEL_CFG: dict[str, float] = {
@@ -69,14 +75,18 @@ class VideoDispatcher:
     def __init__(
         self,
         higgsfield_api_key: str | None = None,
+        xai_api_key: str | None = None,
         comfyui_host: str = "http://127.0.0.1:8188",
         higgsfield_timeout_sec: float = 900.0,
+        grok_timeout_sec: float = 900.0,
         comfyui_timeout_sec: float = 600.0,
         max_concurrent: int = 4,
     ) -> None:
         self._hf_key = higgsfield_api_key
+        self._xai_key = xai_api_key
         self._comfyui_host = comfyui_host
         self._hf_timeout = higgsfield_timeout_sec
+        self._grok_timeout = grok_timeout_sec
         self._cu_timeout = comfyui_timeout_sec
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._exporter = ComfyUIWorkflowExporter()
@@ -98,13 +108,17 @@ class VideoDispatcher:
                 api_key=self._hf_key,
                 timeout_sec=self._hf_timeout,
             ) as hf_client,
+            GrokVideoClient(
+                api_key=self._xai_key,
+                timeout_sec=self._grok_timeout,
+            ) as grok_client,
             ComfyUIClient(
                 host=self._comfyui_host,
                 timeout_sec=self._cu_timeout,
             ) as cu_client,
         ):
             tasks = [
-                self._dispatch_one(job, config, hf_client, cu_client)
+                self._dispatch_one(job, config, hf_client, grok_client, cu_client)
                 for job in jobs
             ]
             results: list[ComfyUISubmitResult] = await asyncio.gather(*tasks)
@@ -125,12 +139,15 @@ class VideoDispatcher:
         job: LtxSceneJob,
         config: LtxGenerationConfig,
         hf_client: HiggsfieldClient,
+        grok_client: GrokVideoClient,
         cu_client: ComfyUIClient,
     ) -> ComfyUISubmitResult:
         async with self._semaphore:
             model = job.preferred_model.lower().replace(" ", "")
             if model in _HIGGSFIELD_MODELS:
                 return await self._run_higgsfield(job, config, hf_client)
+            if model in _GROK_MODELS:
+                return await self._run_grok(job, config, grok_client)
             return await self._run_comfyui(job, config, cu_client)
 
     async def _run_higgsfield(
@@ -163,6 +180,39 @@ class VideoDispatcher:
             return await client.submit_and_await(req, timeout_sec=self._hf_timeout)
         except Exception as exc:
             logger.error("Higgsfield error for %s: %s", job.scene_id, exc)
+            return ComfyUISubmitResult(
+                prompt_id="",
+                scene_id=job.scene_id,
+                status=ComfyUIJobStatus.ERROR,
+                error=str(exc),
+            )
+
+    async def _run_grok(
+        self,
+        job: LtxSceneJob,
+        config: LtxGenerationConfig,
+        client: GrokVideoClient,
+    ) -> ComfyUISubmitResult:
+        prompt = job.prompts[0] if job.prompts else ""
+        req = GrokVideoRequest(
+            scene_id=job.scene_id,
+            prompt=prompt,
+            duration_sec=max(1, int(job.duration_sec)),
+            fps=24,
+            resolution=config.resolution,
+            aspect_ratio=config.aspect_ratio,
+            camera_motion=job.camera_motion,
+            start_frame_url=self._keyframe_url(job, frame_type="first"),
+            end_frame_url=self._keyframe_url(job, frame_type="last"),
+        )
+        logger.info(
+            "→ Grok 4.2  scene=%s  duration=%ds",
+            job.scene_id, req.duration_sec,
+        )
+        try:
+            return await client.submit_and_await(req, timeout_sec=self._grok_timeout)
+        except Exception as exc:
+            logger.error("Grok error for %s: %s", job.scene_id, exc)
             return ComfyUISubmitResult(
                 prompt_id="",
                 scene_id=job.scene_id,
@@ -230,8 +280,10 @@ async def dispatch_scenario(req: VideoDispatchRequest) -> ComfyUIBatchResult:
 
     dispatcher = VideoDispatcher(
         higgsfield_api_key=req.higgsfield_api_key,
+        xai_api_key=req.xai_api_key,
         comfyui_host=req.comfyui_host,
         higgsfield_timeout_sec=req.higgsfield_timeout_sec,
+        grok_timeout_sec=req.grok_timeout_sec,
         comfyui_timeout_sec=req.comfyui_timeout_sec,
     )
     return await dispatcher.dispatch_batch(job_response.scene_jobs, req.config)

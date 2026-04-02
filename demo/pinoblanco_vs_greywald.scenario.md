@@ -30,7 +30,7 @@
 [VISUAL: extreme slow-motion — katana tip one inch from chain link mid-air, sparks frozen in space between them, both characters grimacing in maximum effort, sweat droplets suspended, fur strands floating]
 [STYLE: Pixar hyper-detailed slow-motion, split warm/cool lighting (warm on Pinoblanco side, cool blue on Greywald), practical spark VFX, maximum fur simulation detail]
 [AUDIO: music drops to single low sustained string, silence except for slo-mo whoosh, then deafening clang and music explosion on contact]
-[MODEL: sora2]
+[MODEL: grok4.2]
 [CAMERA: 45-degree orbit around point of contact, creeping slow]
 
 ## Scene 6 — Pixar Twist Finale (0:50–1:00)
