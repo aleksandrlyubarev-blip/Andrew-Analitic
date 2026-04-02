@@ -272,3 +272,49 @@ class ComfyUISubmitRequest(BaseModel):
     config: LtxGenerationConfig = Field(default_factory=LtxGenerationConfig)
     comfyui_host: str = "http://127.0.0.1:8188"
     timeout_sec: float = 600.0
+
+
+# ── Higgsfield cloud generation ───────────────────────────────────────────────
+
+class HiggsfieldGenerationRequest(BaseModel):
+    """
+    Per-scene generation request for the Higgsfield API.
+
+    Built by VideoDispatcher from LtxSceneJob fields.
+    model must be one of: sora2, wan2.6, veo3.1 (or their dash-separated aliases).
+    """
+
+    scene_id: str = ""
+    model: str                         # "sora2" | "wan2.6" | "veo3.1"
+    prompt: str
+    negative_prompt: str = "worst quality, inconsistent motion, blurry, jittery, distorted"
+    duration_sec: int = 8              # Higgsfield accepts integer seconds
+    fps: int = 24
+    resolution: str = "1920x1080"
+    aspect_ratio: str = "16:9"
+    guidance_scale: float = 7.5
+    seed: Optional[int] = None
+    camera_motion: str = ""
+    # Start+End frame mode (WAN 2.6 / Veo)
+    start_frame_url: Optional[str] = None
+    end_frame_url: Optional[str] = None
+    # Multi-Image Reference (Veo 3.1)
+    reference_image_urls: List[str] = Field(default_factory=list)
+
+
+class VideoDispatchRequest(BaseModel):
+    """
+    API body for POST /video/dispatch.
+
+    The dispatcher routes each scene to Higgsfield (Sora 2 / WAN 2.6 / Veo 3.1)
+    or to local ComfyUI (ltx2.3 / empty preferred_model) based on the
+    [MODEL: ...] tag parsed from the scenario.
+    """
+
+    project_id: str
+    scenario_text: str
+    config: LtxGenerationConfig = Field(default_factory=LtxGenerationConfig)
+    higgsfield_api_key: Optional[str] = None   # falls back to HIGGSFIELD_API_KEY env
+    higgsfield_timeout_sec: float = 900.0
+    comfyui_host: str = "http://127.0.0.1:8188"
+    comfyui_timeout_sec: float = 600.0

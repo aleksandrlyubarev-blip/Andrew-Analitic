@@ -42,7 +42,9 @@ from bridge.schemas import (
     SceneReviewRequest,
     SceneReviewResponse,
     ScheduleRequest,
+    VideoDispatchRequest,
 )
+from bridge.video_dispatcher import dispatch_scenario
 from bridge.service import AndrewMoltisBridge
 
 logger = logging.getLogger("bridge_api")
@@ -311,6 +313,24 @@ async def submit_video_to_comfyui(request: Request, req: ComfyUISubmitRequest):
             scene_ids=scene_ids,
             timeout_sec=req.timeout_sec,
         )
+
+
+@app.post("/video/dispatch", response_model=ComfyUIBatchResult)
+@limiter.limit("3/minute")
+async def dispatch_video(request: Request, req: VideoDispatchRequest):
+    """
+    Smart dispatcher: parse scenario → route each scene by [MODEL: ...] tag.
+
+    Scenes tagged ``[MODEL: sora2 / wan2.6 / veo3.1]`` go to **Higgsfield**.
+    Scenes tagged ``[MODEL: ltx2.3]`` or with no MODEL tag go to **local ComfyUI**.
+
+    Both backends run concurrently (max 4 parallel jobs).
+    Returns a unified ComfyUIBatchResult with per-scene status and output URLs.
+
+    Set ``higgsfield_api_key`` in the request body or the ``HIGGSFIELD_API_KEY``
+    environment variable before calling this endpoint.
+    """
+    return await dispatch_scenario(req)
 
 
 @app.get("/video/comfyui/health")
