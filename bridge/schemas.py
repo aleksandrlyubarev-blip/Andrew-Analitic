@@ -5,6 +5,7 @@ Pydantic request and response models for the FastAPI bridge endpoints.
 """
 
 from typing import Any, Dict, List, Optional
+from enum import Enum
 
 from pydantic import BaseModel, Field
 
@@ -219,3 +220,51 @@ class LtxVideoJobResponse(BaseModel):
     comfyui_queue_ready: bool = True
     estimated_vram_gb: float = 0.0
     warnings: List[str] = Field(default_factory=list)
+
+
+# ── ComfyUI submission + polling ──────────────────────────────────────────────
+
+class ComfyUIJobStatus(str, Enum):
+    SUCCESS = "success"
+    ERROR = "error"
+    TIMEOUT = "timeout"
+    PENDING = "pending"
+
+
+class ComfyUIOutputFile(BaseModel):
+    """A single output file produced by a ComfyUI job."""
+
+    node_id: str
+    filename: str
+    subfolder: str = ""
+    file_type: str = "output"
+    url: str = ""  # /view?filename=...&type=output
+
+
+class ComfyUISubmitResult(BaseModel):
+    """Result of submitting one workflow and awaiting its completion."""
+
+    prompt_id: str
+    scene_id: str = ""
+    status: ComfyUIJobStatus = ComfyUIJobStatus.PENDING
+    output_files: List[ComfyUIOutputFile] = Field(default_factory=list)
+    error: Optional[str] = None
+
+
+class ComfyUIBatchResult(BaseModel):
+    """Aggregate result of a full batch submission (one entry per scene)."""
+
+    total: int
+    succeeded: int
+    failed: int
+    results: List[ComfyUISubmitResult] = Field(default_factory=list)
+
+
+class ComfyUISubmitRequest(BaseModel):
+    """API request to submit a parsed scenario to local ComfyUI."""
+
+    project_id: str
+    scenario_text: str
+    config: LtxGenerationConfig = Field(default_factory=LtxGenerationConfig)
+    comfyui_host: str = "http://127.0.0.1:8188"
+    timeout_sec: float = 600.0

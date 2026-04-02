@@ -24,12 +24,15 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from bridge.client import MoltisConfig
+from bridge.comfyui_client import ComfyUIClient
 from bridge.comfyui_export import ComfyUIWorkflowExporter
 from bridge.ltx_video import LtxVideoPipeline
 from bridge.scene_ops import build_demo_scene_ops_request
 from bridge.schemas import (
     AnalyzeRequest,
     AnalyzeResponse,
+    ComfyUIBatchResult,
+    ComfyUISubmitRequest,
     HealthResponse,
     LtxGenerationConfig,
     LtxVideoJobRequest,
@@ -268,6 +271,59 @@ async def generate_video_comfyui(request: Request, req: LtxVideoJobRequest):
         "estimated_vram_gb": job_response.estimated_vram_gb,
         "workflows": workflows,
     }
+
+
+@app.post("/video/submit", response_model=ComfyUIBatchResult)
+@limiter.limit("3/minute")
+async def submit_video_to_comfyui(request: Request, req: ComfyUISubmitRequest):
+    """
+    Full pipeline: parse scenario → build ComfyUI workflows → submit to local
+    ComfyUI instance → poll until all scenes complete.
+
+    Requires a running ComfyUI instance with the ComfyUI-LTXVideo extension.
+    Default target: ``http://127.0.0.1:8188`` (override via ``comfyui_host``).
+
+    Returns a ComfyUIBatchResult with per-scene output file paths once done.
+    Long-running — set your HTTP client timeout to at least ``timeout_sec`` + 30 s.
+    """
+    pipeline = LtxVideoPipeline()
+    job_response = pipeline.run(
+        LtxVideoJobRequest(
+            project_id=req.project_id,
+            scenario_text=req.scenario_text,
+            config=req.config,
+        )
+    )
+
+    if not job_response.scene_jobs:
+        return ComfyUIBatchResult(total=0, succeeded=0, failed=0, results=[])
+
+    exporter = ComfyUIWorkflowExporter()
+    workflows = [exporter.export_job(job, req.config) for job in job_response.scene_jobs]
+    scene_ids = [job.scene_id for job in job_response.scene_jobs]
+
+    async with ComfyUIClient(
+        host=req.comfyui_host,
+        timeout_sec=req.timeout_sec,
+    ) as client:
+        return await client.submit_batch(
+            workflows,
+            scene_ids=scene_ids,
+            timeout_sec=req.timeout_sec,
+        )
+
+
+@app.get("/video/comfyui/health")
+async def comfyui_health(host: str = "http://127.0.0.1:8188"):
+    """
+    Check whether the local ComfyUI instance is reachable and return its
+    system stats (VRAM free, queue depth, device info).
+    """
+    async with ComfyUIClient(host=host) as client:
+        try:
+            return await client.health()
+        except Exception as exc:
+            return {"comfyui": "unreachable", "error": str(exc)}
 
 
 @app.post("/schedule")
