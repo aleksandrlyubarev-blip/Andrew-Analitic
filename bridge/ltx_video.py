@@ -11,6 +11,8 @@ Supported scenario tag syntax (case-insensitive):
     [VISUAL: ...]   visual action / scene description
     [STYLE:  ...]   visual style (cinematic, neon-tech, etc.)
     [AUDIO:  ...]   audio: voiceover text + sfx description
+    [MODEL:  ...]   preferred generation backend (sora2, wan2.6, veo3.1, ltx2.3)
+    [CAMERA: ...]   camera motion descriptor (slow zoom, whip-pan, tracking shot)
 
 Scene header patterns accepted:
     ## Scene 1 — Title (0:00–0:15)
@@ -37,7 +39,7 @@ from bridge.schemas import (
 # ── regex helpers ─────────────────────────────────────────────────────────────
 
 _TAG_RE = re.compile(
-    r"\[(?P<tag>VISUAL|STYLE|AUDIO)\s*:\s*(?P<value>[^\]]+)\]",
+    r"\[(?P<tag>VISUAL|STYLE|AUDIO|MODEL|CAMERA)\s*:\s*(?P<value>[^\]]+)\]",
     re.IGNORECASE,
 )
 
@@ -169,6 +171,8 @@ class LtxScenarioParser:
         visual_prompt = tags.get("VISUAL", "")
         style = tags.get("STYLE", "")
         audio_description = tags.get("AUDIO", "")
+        preferred_model = tags.get("MODEL", "").lower().replace(" ", "")
+        camera_motion = tags.get("CAMERA", "")
 
         # fallback: use first non-header, non-empty line as visual prompt
         if not visual_prompt:
@@ -205,6 +209,8 @@ class LtxScenarioParser:
             visual_prompt=visual_prompt,
             style=style,
             audio_description=audio_description,
+            preferred_model=preferred_model,
+            camera_motion=camera_motion,
             keyframes=keyframes,
             workflow=workflow,
         )
@@ -309,6 +315,8 @@ class LtxJobBuilder:
             keyframes=scene.keyframes,
             model_config_ltx=model_config_ltx,
             audio=audio,
+            preferred_model=scene.preferred_model,
+            camera_motion=scene.camera_motion,
             status="queued",
         )
 

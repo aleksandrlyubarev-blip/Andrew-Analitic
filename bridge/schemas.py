@@ -169,6 +169,8 @@ class LtxScene(BaseModel):
     visual_prompt: str
     style: str = ""
     audio_description: str = ""
+    preferred_model: str = ""   # e.g. "sora2", "wan2.6", "veo3.1", "ltx2.3"
+    camera_motion: str = ""     # e.g. "slow zoom", "whip-pan", "tracking"
     keyframes: List[LtxKeyframe] = Field(default_factory=list)
     workflow: str = "first_last"  # "first_last" | "multi_keyframe"
 
@@ -208,6 +210,8 @@ class LtxSceneJob(BaseModel):
     keyframes: List[LtxKeyframe]
     model_config_ltx: Dict[str, Any] = Field(default_factory=dict)
     audio: Dict[str, Any] = Field(default_factory=dict)
+    preferred_model: str = ""   # routing hint for multi-backend dispatchers
+    camera_motion: str = ""
     status: str = "queued"
 
 
