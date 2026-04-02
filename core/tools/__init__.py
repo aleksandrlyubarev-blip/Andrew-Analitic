@@ -9,6 +9,7 @@ from core.tools.base import (
     ValidationResult,
 )
 from core.tools.file_read import FileReadInput, FileReadTool
+from core.tools.ltx_generate import LtxGenerateTool, make_ltx_generate_tool
 from core.tools.python_exec import PythonExecInput, PythonExecTool
 from core.tools.sql_query import SQLQueryInput, SQLQueryTool
 
@@ -18,6 +19,7 @@ def build_default_tool_registry():
         "sql_query": SQLQueryTool(),
         "python_exec": PythonExecTool(),
         "file_read": FileReadTool(),
+        "ltx_generate": make_ltx_generate_tool(),
     }
 
 
@@ -29,6 +31,8 @@ __all__ = [
     "ValidationResult",
     "FileReadInput",
     "FileReadTool",
+    "LtxGenerateTool",
+    "make_ltx_generate_tool",
     "PythonExecInput",
     "PythonExecTool",
     "SQLQueryInput",

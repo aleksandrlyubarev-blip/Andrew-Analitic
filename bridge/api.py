@@ -24,11 +24,16 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from bridge.client import MoltisConfig
+from bridge.comfyui_export import ComfyUIWorkflowExporter
+from bridge.ltx_video import LtxVideoPipeline
 from bridge.scene_ops import build_demo_scene_ops_request
 from bridge.schemas import (
     AnalyzeRequest,
     AnalyzeResponse,
     HealthResponse,
+    LtxGenerationConfig,
+    LtxVideoJobRequest,
+    LtxVideoJobResponse,
     SceneOpsAggregateRequest,
     SceneOpsSnapshotResponse,
     SceneReviewRequest,
@@ -221,6 +226,47 @@ async def moltis_webhook(request: Request):
         "status": "completed",
         "response": result.get("formatted_message", "Analysis complete."),
         "confidence": result.get("confidence", 0),
+    }
+
+
+@app.post("/video/generate", response_model=LtxVideoJobResponse)
+@limiter.limit("5/minute")
+async def generate_video(request: Request, req: LtxVideoJobRequest):
+    """
+    Parse a Bassito ТЗ/scenario text and return a ComfyUI-ready LTX 2.3 job queue.
+
+    Each scene in the scenario becomes one LtxSceneJob.  Jobs are returned in
+    scene order and can be submitted to ComfyUI via POST /prompt on the local
+    ComfyUI instance.
+
+    Supports both 16:9 (1920×1080) and 9:16 (1080×1920) outputs.
+    Set ``config.aspect_ratio`` to ``"9:16"`` for Shorts / Reels.
+    """
+    pipeline = LtxVideoPipeline()
+    return pipeline.run(req)
+
+
+@app.post("/video/generate/comfyui")
+@limiter.limit("5/minute")
+async def generate_video_comfyui(request: Request, req: LtxVideoJobRequest):
+    """
+    Same as ``/video/generate`` but returns raw ComfyUI workflow JSON payloads.
+
+    Each element in ``workflows`` is ready for ``POST http://127.0.0.1:8188/prompt``.
+    """
+    pipeline = LtxVideoPipeline()
+    job_response = pipeline.run(req)
+    exporter = ComfyUIWorkflowExporter()
+    workflows = [
+        exporter.wrap_for_api(exporter.export_job(job, req.config))
+        for job in job_response.scene_jobs
+    ]
+    return {
+        "project_id": req.project_id,
+        "total_scenes": job_response.total_scenes,
+        "warnings": job_response.warnings,
+        "estimated_vram_gb": job_response.estimated_vram_gb,
+        "workflows": workflows,
     }
 
 

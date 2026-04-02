@@ -199,6 +199,31 @@ class AndrewMoltisBridge:
         response["formatted_message"] = self._format_scene_review_for_channel(response)
         return response
 
+    def _get_ltx_pipeline(self):
+        """Lazy-load the LTX video generation pipeline."""
+        if not hasattr(self, "_ltx_pipeline") or self._ltx_pipeline is None:
+            from bridge.ltx_video import LtxVideoPipeline
+            self._ltx_pipeline = LtxVideoPipeline()
+            logger.info("LtxVideoPipeline initialized")
+        return self._ltx_pipeline
+
+    async def handle_ltx_generate(
+        self,
+        payload: Dict[str, Any],
+        context: Optional[Dict] = None,
+    ) -> Dict[str, Any]:
+        """
+        Parse a Bassito ТЗ/scenario and return a ComfyUI-ready LTX job queue.
+
+        Wraps LtxVideoPipeline.run() so the bridge can call it the same way
+        it calls handle_scene_review / handle_scene_ops.
+        """
+        from bridge.schemas import LtxVideoJobRequest
+        request = LtxVideoJobRequest(**payload)
+        pipeline = self._get_ltx_pipeline()
+        result = pipeline.run(request)
+        return result.model_dump()
+
     async def handle_scene_ops(
         self,
         scene_payload: Dict[str, Any],
