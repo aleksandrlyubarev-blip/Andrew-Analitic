@@ -34,6 +34,8 @@ from bridge.schemas import (
     SceneReviewRequest,
     SceneReviewResponse,
     ScheduleRequest,
+    SwarmSimRequest,
+    SwarmSimResponse,
 )
 from bridge.service import AndrewMoltisBridge
 
@@ -183,6 +185,24 @@ async def demo_scene_ops():
     )
 
 
+@app.post("/swarm/simulate", response_model=SwarmSimResponse)
+@limiter.limit("5/minute")
+async def swarm_simulate(request: Request, req: SwarmSimRequest):
+    """
+    Run AndrewSim: multi-agent swarm simulation for Physical AI / RoboQC forecasting.
+    Feed production data → get defect probability forecasts + recommended PLC actions.
+    """
+    bridge = get_bridge()
+    result = await bridge.handle_swarm_simulation(
+        query=req.query,
+        production_data=req.production_data,
+        scenario_count=req.scenario_count,
+        personality_profiles=req.personality_profiles,
+        context={"channel": req.channel, "user_id": req.user_id, "session_id": req.session_id},
+    )
+    return SwarmSimResponse(**{k: v for k, v in result.items() if k in SwarmSimResponse.model_fields})
+
+
 @app.post("/webhook/moltis")
 @limiter.limit("30/minute")
 async def moltis_webhook(request: Request):
@@ -208,6 +228,7 @@ async def moltis_webhook(request: Request):
         "trend", "calculate", "query", "data", "statistics", "compare",
         "predict", "average", "total", "breakdown",
         "explain", "what is", "how does", "tutorial", "define",
+        "swarm", "simulate", "defect forecast", "shift forecast",
     ]
     if not any(signal in message.lower() for signal in analytical_signals):
         return {"status": "skipped", "reason": "not analytical — Moltis handles this"}

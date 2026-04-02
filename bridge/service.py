@@ -16,7 +16,7 @@ import asyncio
 import logging
 import os
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from bridge.client import MoltisClient, MoltisConfig
 from bridge.hitl import HitlGate
@@ -49,6 +49,7 @@ class AndrewMoltisBridge:
         self._andrew_executor = None
         self._scene_reviewer = None
         self._scene_ops_aggregator = None
+        self._mirofish_executor = None
         self._db_url = andrew_db_url or os.getenv("DATABASE_URL", "")
         self.hitl = HitlGate()
 
@@ -310,6 +311,76 @@ class AndrewMoltisBridge:
             f"Time: {response.get('elapsed_seconds', 0)}s_"
         )
         return "\n".join(parts)
+
+    def _get_mirofish_executor(self):
+        if self._mirofish_executor is None:
+            from core.mirofish_swarm import MiroFishExecutor
+            self._mirofish_executor = MiroFishExecutor()
+            logger.info("MiroFish swarm executor initialized")
+        return self._mirofish_executor
+
+    async def handle_swarm_simulation(
+        self,
+        query: str,
+        production_data: Optional[Dict] = None,
+        scenario_count: int = 1000,
+        personality_profiles: Optional[List[str]] = None,
+        context: Optional[Dict] = None,
+    ) -> Dict[str, Any]:
+        context = context or {}
+        start_time = time.time()
+        logger.info(f"AndrewSim received: {query[:80]}")
+
+        executor = self._get_mirofish_executor()
+        result = await asyncio.to_thread(
+            executor.execute,
+            query,
+            production_data or {},
+            scenario_count,
+            personality_profiles or [],
+        )
+        elapsed = time.time() - start_time
+
+        response = {
+            "query": query,
+            "final_report": result.output,
+            "defect_probability": result.defect_probability,
+            "recommended_action": result.recommended_action,
+            "visual_evidence": result.visual_evidence,
+            "risk_level": result.risk_level,
+            "forecast_horizon": result.forecast_horizon,
+            "confidence": result.confidence,
+            "cost_usd": result.cost_usd,
+            "success": result.success,
+            "error": result.error,
+            "elapsed_seconds": round(elapsed, 2),
+            "simulation_stats": result.simulation_stats,
+            "formatted_message": self._format_swarm_for_channel(result),
+        }
+
+        if self.store_results and result.success:
+            try:
+                await self.moltis.store_memory(
+                    content=f"SwarmSim: {query}\nDefect P={result.defect_probability:.1%}\nAction: {result.recommended_action}",
+                    metadata={"type": "swarm_sim", "confidence": result.confidence, "risk": result.risk_level},
+                )
+            except Exception as e:
+                logger.warning(f"SwarmSim memory store failed: {e}")
+
+        return response
+
+    def _format_swarm_for_channel(self, result) -> str:
+        risk_emoji = {"low": "✅", "medium": "⚠️", "high": "🔴", "critical": "🚨"}.get(result.risk_level, "❓")
+        parts = [
+            f"**AndrewSim Forecast** {risk_emoji} (confidence: {result.confidence:.0%})",
+            f"**Defect Probability:** {result.defect_probability:.1%}",
+            f"**Risk Level:** {result.risk_level.upper()}",
+            f"**Recommended Action:** {result.recommended_action}",
+            "",
+            result.output[:1500] if result.output else "",
+            f"\n_Scenarios: {result.simulation_stats.get('scenario_count', '?')} | Cost: ${result.cost_usd:.4f} | Time: {result.forecast_horizon}_",
+        ]
+        return "\n".join(p for p in parts if p is not None)
 
     async def handle_scheduled_task(self, task: str) -> Dict[str, Any]:
         """Handle a cron-triggered analytical task."""

@@ -60,6 +60,14 @@ ANALYTICAL_SIGNALS: List[str] = DATA_REQUEST_SIGNALS + [
     "machine learning", "neural network", "time series",
 ]
 
+MIROFISH_SIGNALS: List[str] = [
+    "swarm", "simulate", "simulation", "forecast defect", "defect forecast",
+    "future scenario", "digital twin", "what will happen", "predict failure",
+    "failure prediction", "patchcore", "roboqc", "quality control forecast",
+    "production forecast", "shift forecast", "next shift", "next week defect",
+    "anomaly forecast", "assembly line forecast", "plc forecast",
+]
+
 
 def _classify(query: str) -> tuple[str, List[str]]:
     """
@@ -76,6 +84,9 @@ def _classify(query: str) -> tuple[str, List[str]]:
     question does NOT trigger "both" — it is just vocabulary context.
     """
     q = (query or "").lower().strip()
+    mirofish_hits = [s for s in MIROFISH_SIGNALS if s in q]
+    if mirofish_hits:
+        return "mirofish", mirofish_hits
     edu_hits = [s for s in EDUCATIONAL_SIGNALS if s in q]
     data_hits = [s for s in DATA_REQUEST_SIGNALS if s in q]
     ana_hits = [s for s in ANALYTICAL_SIGNALS if s in q]
@@ -96,14 +107,16 @@ class SupervisorState(TypedDict, total=False):
     query: str
     db_url: str
     schema_context: Dict[str, Dict[str, str]]
+    production_data: Optional[Dict[str, Any]]
 
     # Routing
-    agent_decision: str       # "andrew" | "romeo" | "both"
+    agent_decision: str       # "andrew" | "romeo" | "both" | "mirofish"
     classification_signals: List[str]
 
     # Results (stored as dicts to avoid TypedDict nesting issues)
     andrew_result: Optional[Any]   # AndrewResult instance
     romeo_result: Optional[Any]    # RomeoResult instance
+    mirofish_result: Optional[Any]  # MiroFishResult instance
 
     # Final output
     final_output: str
@@ -162,10 +175,13 @@ class SupervisorResult:
         logs = []
         ar = state.get("andrew_result")
         rr = state.get("romeo_result")
+        mr = state.get("mirofish_result")
         if ar and hasattr(ar, "audit_log"):
             logs.extend(ar.audit_log or [])
         if rr and hasattr(rr, "audit_log"):
             logs.extend(rr.audit_log or [])
+        if mr and hasattr(mr, "audit_log"):
+            logs.extend(mr.audit_log or [])
         return logs
 
     @property
@@ -262,15 +278,43 @@ def run_romeo(state: SupervisorState) -> Dict[str, Any]:
     }
 
 
+def run_mirofish(state: SupervisorState) -> Dict[str, Any]:
+    """Execute the MiroFish swarm simulation pipeline."""
+    from core.mirofish_swarm import MiroFishExecutor
+    executor = MiroFishExecutor()
+    result = executor.execute(
+        query=state.get("query", ""),
+        production_data=state.get("production_data"),
+    )
+    logger.info(f"MiroFish done: success={result.success}, cost=${result.cost:.4f}, risk={result.risk_level}")
+    new_cost = state.get("cost_usd", 0.0) + result.cost
+    warnings = list(state.get("warnings", []))
+    warnings.extend(result.warnings or [])
+    return {
+        "mirofish_result": result,
+        "cost_usd": new_cost,
+        "warnings": warnings,
+    }
+
+
 def fuse_results(state: SupervisorState) -> Dict[str, Any]:
     """Merge one or both agent results into a single final_output."""
     ar = state.get("andrew_result")
     rr = state.get("romeo_result")
 
+    mr = state.get("mirofish_result")
     parts = []
     error_parts = []
     confidences = []
     agent_labels = []
+
+    if mr is not None:
+        agent_labels.append("mirofish")
+        if mr.success:
+            parts.append(f"### Swarm Forecast\n{mr.output}")
+            confidences.append(mr.confidence)
+        elif mr.error:
+            error_parts.append(f"MiroFish error: {mr.error}")
 
     if ar is not None:
         agent_labels.append("andrew")
@@ -316,7 +360,10 @@ def fuse_results(state: SupervisorState) -> Dict[str, Any]:
 # ============================================================
 
 def _route_from_classify(state: SupervisorState) -> str:
-    return state.get("agent_decision", "andrew")
+    decision = state.get("agent_decision", "andrew")
+    if decision in ("andrew", "romeo", "both", "mirofish"):
+        return decision
+    return "andrew"
 
 
 def _after_andrew(state: SupervisorState) -> str:
@@ -346,6 +393,7 @@ def _get_graph():
     workflow.add_node("classify_query", classify_query)
     workflow.add_node("run_andrew", run_andrew)
     workflow.add_node("run_romeo", run_romeo)
+    workflow.add_node("run_mirofish", run_mirofish)
     workflow.add_node("fuse_results", fuse_results)
 
     workflow.add_edge(START, "classify_query")
@@ -354,6 +402,7 @@ def _get_graph():
         "andrew": "run_andrew",
         "romeo": "run_romeo",
         "both": "run_andrew",    # both: andrew first, then romeo
+        "mirofish": "run_mirofish",
     })
 
     workflow.add_conditional_edges("run_andrew", _after_andrew, {
@@ -362,6 +411,7 @@ def _get_graph():
     })
 
     workflow.add_edge("run_romeo", "fuse_results")
+    workflow.add_edge("run_mirofish", "fuse_results")
     workflow.add_edge("fuse_results", END)
 
     _supervisor_graph = workflow.compile()
@@ -390,12 +440,13 @@ class SwarmSupervisor:
             logger.info(f"Schema: {list(self._schema.keys())}")
         return self._schema
 
-    def execute(self, goal: str) -> SupervisorResult:
+    def execute(self, goal: str, production_data: Optional[Dict] = None) -> SupervisorResult:
         logger.info(f"SwarmSupervisor v1.0.0 | {goal[:80]}")
         state = _get_graph().invoke({
             "query": goal,
             "db_url": self.db_url,
             "schema_context": self.schema,
+            "production_data": production_data,
             "cost_usd": 0.0,
             "warnings": [],
             "error_message": "",

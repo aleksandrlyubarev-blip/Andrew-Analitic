@@ -143,3 +143,30 @@ class SceneOpsSnapshotResponse(BaseModel):
     bassitoJobs: List[SceneOpsBassitoJob] = Field(default_factory=list)
     updatedAt: str
     source: str = "api"
+
+
+class SwarmSimRequest(BaseModel):
+    query: str
+    production_data: Dict[str, Any] = Field(default_factory=dict)
+    scenario_count: int = Field(default=1000, ge=10, le=10000)
+    personality_profiles: List[str] = Field(default_factory=list)
+    channel: str = "api"
+    user_id: Optional[str] = None
+    session_id: Optional[str] = None
+
+
+class SwarmSimResponse(BaseModel):
+    query: str
+    final_report: str
+    defect_probability: float
+    recommended_action: str
+    visual_evidence: List[str] = Field(default_factory=list)
+    risk_level: str
+    forecast_horizon: str
+    confidence: float
+    cost_usd: float
+    success: bool
+    error: Optional[str] = None
+    elapsed_seconds: float
+    simulation_stats: Dict[str, Any] = Field(default_factory=dict)
+    formatted_message: str
