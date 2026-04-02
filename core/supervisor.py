@@ -381,6 +381,7 @@ class SwarmSupervisor:
     def __init__(self, db_url: Optional[str] = None):
         self.db_url = db_url or os.getenv("DATABASE_URL", "")
         self._schema: Optional[Dict] = None
+        self._andrew_executor = None
 
     @property
     def schema(self) -> Dict[str, Dict[str, str]]:
@@ -389,6 +390,47 @@ class SwarmSupervisor:
             self._schema = discover_schema(self.db_url)
             logger.info(f"Schema: {list(self._schema.keys())}")
         return self._schema
+
+    def _get_andrew_executor(self):
+        if self._andrew_executor is None:
+            from core.andrew_swarm import AndrewExecutor
+
+            self._andrew_executor = AndrewExecutor(db_url=self.db_url)
+        if self._schema is not None:
+            self._andrew_executor._schema = self._schema
+        return self._andrew_executor
+
+    def available_tools(self) -> List[str]:
+        return self._get_andrew_executor().available_tools()
+
+    async def get_tool_prompts(self) -> Dict[str, str]:
+        return await self._get_andrew_executor().get_tool_prompts()
+
+    async def run_tool_calls(
+        self,
+        calls,
+        *,
+        working_directory: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ):
+        return await self._get_andrew_executor().run_tool_calls(
+            calls,
+            working_directory=working_directory,
+            metadata=metadata,
+        )
+
+    def run_tool_calls_sync(
+        self,
+        calls,
+        *,
+        working_directory: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ):
+        return self._get_andrew_executor().run_tool_calls_sync(
+            calls,
+            working_directory=working_directory,
+            metadata=metadata,
+        )
 
     def execute(self, goal: str) -> SupervisorResult:
         logger.info(f"SwarmSupervisor v1.0.0 | {goal[:80]}")
@@ -404,6 +446,8 @@ class SwarmSupervisor:
 
     def invalidate_schema(self):
         self._schema = None
+        if self._andrew_executor is not None:
+            self._andrew_executor.invalidate_schema()
 
 
 # ============================================================

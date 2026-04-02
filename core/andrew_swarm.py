@@ -12,6 +12,7 @@ Sprint 4 additions over v0.3:
 """
 
 import ast
+import asyncio
 import hashlib
 import json
 import logging
@@ -1201,6 +1202,7 @@ class AndrewExecutor:
     def __init__(self, db_url: Optional[str] = None):
         self.db_url = db_url or os.getenv("DATABASE_URL", "")
         self._schema: Optional[Dict] = None
+        self._tool_registry: Optional[Dict[str, Any]] = None
         # Initialise Capability Registry embeddings (Sprint 5 §3).
         # No-ops silently when the embedding API is unavailable; keyword
         # fallback in SemanticRouter stays active in that case.
@@ -1216,6 +1218,84 @@ class AndrewExecutor:
             self._schema = discover_schema(self.db_url)
             logger.info(f"Schema: {list(self._schema.keys())}")
         return self._schema
+
+    @property
+    def tool_registry(self) -> Dict[str, Any]:
+        if self._tool_registry is None:
+            from core.tools import build_default_tool_registry
+
+            self._tool_registry = build_default_tool_registry()
+        return self._tool_registry
+
+    def available_tools(self) -> List[str]:
+        return sorted(self.tool_registry.keys())
+
+    def build_tool_context(
+        self,
+        *,
+        working_directory: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ):
+        from core.tools import ToolUseContext
+
+        return ToolUseContext(
+            db_url=self.db_url,
+            schema_context=self.schema,
+            working_directory=working_directory,
+            metadata=metadata or {},
+            available_tools=self.tool_registry,
+        )
+
+    async def get_tool_prompts(self) -> Dict[str, str]:
+        prompts: Dict[str, str] = {}
+        for name, tool in self.tool_registry.items():
+            prompts[name] = await tool.prompt()
+        return prompts
+
+    async def run_tool_calls(
+        self,
+        calls,
+        *,
+        working_directory: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ):
+        from core.orchestration import ToolCall, run_tools
+
+        normalized_calls = [
+            call if isinstance(call, ToolCall) else ToolCall(**call)
+            for call in calls
+        ]
+        context = self.build_tool_context(
+            working_directory=working_directory,
+            metadata=metadata,
+        )
+
+        executions = []
+        async for execution in run_tools(normalized_calls, self.tool_registry, context):
+            executions.append(execution)
+        return executions
+
+    def run_tool_calls_sync(
+        self,
+        calls,
+        *,
+        working_directory: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(
+                self.run_tool_calls(
+                    calls,
+                    working_directory=working_directory,
+                    metadata=metadata,
+                )
+            )
+        raise RuntimeError(
+            "run_tool_calls_sync cannot be used inside an active event loop; "
+            "await run_tool_calls() instead."
+        )
 
     def execute(self, goal: str) -> AndrewResult:
         logger.info(f"Andrew Swarm v1.0.0-rc1 | {goal[:80]}")
