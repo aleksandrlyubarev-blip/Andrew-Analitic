@@ -287,12 +287,12 @@ def _mock_grok_client(scene_id: str = "scene_05") -> AsyncMock:
     return mock
 
 
-def _mock_hf_client() -> AsyncMock:
+def _mock_veo_client() -> AsyncMock:
     mock = AsyncMock()
     mock.__aenter__ = AsyncMock(return_value=mock)
     mock.__aexit__ = AsyncMock(return_value=False)
     mock.submit_and_await = AsyncMock(return_value=ComfyUISubmitResult(
-        prompt_id="hf-pid", scene_id="", status=ComfyUIJobStatus.SUCCESS, output_files=[],
+        prompt_id="veo-pid", scene_id="", status=ComfyUIJobStatus.SUCCESS, output_files=[],
     ))
     return mock
 
@@ -312,11 +312,11 @@ async def test_r1_grok42_routes_to_grok():
     from unittest.mock import patch
     job = _make_scene_job("grok4.2", "scene_05")
     grok_mock = _mock_grok_client("scene_05")
-    hf_mock = _mock_hf_client()
+    veo_mock = _mock_veo_client()
     cu_mock = _mock_cu_client()
 
     with (
-        patch("bridge.video_dispatcher.HiggsfieldClient", return_value=hf_mock),
+        patch("bridge.video_dispatcher.VeoVideoClient", return_value=veo_mock),
         patch("bridge.video_dispatcher.GrokVideoClient", return_value=grok_mock),
         patch("bridge.video_dispatcher.ComfyUIClient", return_value=cu_mock),
     ):
@@ -324,7 +324,7 @@ async def test_r1_grok42_routes_to_grok():
         result = await dispatcher.dispatch_batch([job], LtxGenerationConfig())
 
     grok_mock.submit_and_await.assert_called_once()
-    hf_mock.submit_and_await.assert_not_called()
+    veo_mock.submit_and_await.assert_not_called()
     cu_mock.submit_and_await.assert_not_called()
     assert result.succeeded == 1
 
@@ -334,11 +334,11 @@ async def test_r2_grok_dash_alias_routes_to_grok():
     from unittest.mock import patch
     job = _make_scene_job("grok-4.2", "scene_05")
     grok_mock = _mock_grok_client("scene_05")
-    hf_mock = _mock_hf_client()
+    veo_mock = _mock_veo_client()
     cu_mock = _mock_cu_client()
 
     with (
-        patch("bridge.video_dispatcher.HiggsfieldClient", return_value=hf_mock),
+        patch("bridge.video_dispatcher.VeoVideoClient", return_value=veo_mock),
         patch("bridge.video_dispatcher.GrokVideoClient", return_value=grok_mock),
         patch("bridge.video_dispatcher.ComfyUIClient", return_value=cu_mock),
     ):
@@ -350,14 +350,14 @@ async def test_r2_grok_dash_alias_routes_to_grok():
 
 
 @pytest.mark.asyncio
-async def test_r3_mixed_grok_higgsfield_comfyui():
+async def test_r3_mixed_grok_veo_comfyui():
     from unittest.mock import patch
     jobs = [
         _make_scene_job("grok4.2", "scene_05"),
-        _make_scene_job("sora2",   "scene_01"),
+        _make_scene_job("veo3.1",  "scene_01"),
         _make_scene_job("",        "scene_02"),
     ]
-    grok_calls, hf_calls, cu_calls = [], [], []
+    grok_calls, veo_calls, cu_calls = [], [], []
 
     async def _grok_side(req, **_):
         grok_calls.append(req.scene_id)
@@ -366,10 +366,10 @@ async def test_r3_mixed_grok_higgsfield_comfyui():
             status=ComfyUIJobStatus.SUCCESS, output_files=[],
         )
 
-    async def _hf_side(req, **_):
-        hf_calls.append(req.scene_id)
+    async def _veo_side(req, **_):
+        veo_calls.append(req.scene_id)
         return ComfyUISubmitResult(
-            prompt_id="h", scene_id=req.scene_id,
+            prompt_id="v", scene_id=req.scene_id,
             status=ComfyUIJobStatus.SUCCESS, output_files=[],
         )
 
@@ -385,10 +385,10 @@ async def test_r3_mixed_grok_higgsfield_comfyui():
     grok_mock.__aexit__ = AsyncMock(return_value=False)
     grok_mock.submit_and_await = AsyncMock(side_effect=_grok_side)
 
-    hf_mock = AsyncMock()
-    hf_mock.__aenter__ = AsyncMock(return_value=hf_mock)
-    hf_mock.__aexit__ = AsyncMock(return_value=False)
-    hf_mock.submit_and_await = AsyncMock(side_effect=_hf_side)
+    veo_mock = AsyncMock()
+    veo_mock.__aenter__ = AsyncMock(return_value=veo_mock)
+    veo_mock.__aexit__ = AsyncMock(return_value=False)
+    veo_mock.submit_and_await = AsyncMock(side_effect=_veo_side)
 
     cu_mock = AsyncMock()
     cu_mock.__aenter__ = AsyncMock(return_value=cu_mock)
@@ -396,15 +396,15 @@ async def test_r3_mixed_grok_higgsfield_comfyui():
     cu_mock.submit_and_await = AsyncMock(side_effect=_cu_side)
 
     with (
-        patch("bridge.video_dispatcher.HiggsfieldClient", return_value=hf_mock),
+        patch("bridge.video_dispatcher.VeoVideoClient", return_value=veo_mock),
         patch("bridge.video_dispatcher.GrokVideoClient", return_value=grok_mock),
         patch("bridge.video_dispatcher.ComfyUIClient", return_value=cu_mock),
     ):
-        dispatcher = VideoDispatcher(xai_api_key="xai-key", higgsfield_api_key="hf-key")
+        dispatcher = VideoDispatcher(xai_api_key="xai-key", google_api_key="gkey")
         result = await dispatcher.dispatch_batch(jobs, LtxGenerationConfig())
 
     assert grok_calls == ["scene_05"]
-    assert hf_calls == ["scene_01"]
+    assert veo_calls == ["scene_01"]
     assert cu_calls == ["scene_02"]
     assert result.total == 3
     assert result.succeeded == 3
@@ -422,11 +422,11 @@ async def test_r4_grok_error_in_batch():
         prompt_id="x", scene_id="scene_05",
         status=ComfyUIJobStatus.ERROR, error="rate limit exceeded",
     ))
-    hf_mock = _mock_hf_client()
+    veo_mock = _mock_veo_client()
     cu_mock = _mock_cu_client()
 
     with (
-        patch("bridge.video_dispatcher.HiggsfieldClient", return_value=hf_mock),
+        patch("bridge.video_dispatcher.VeoVideoClient", return_value=veo_mock),
         patch("bridge.video_dispatcher.GrokVideoClient", return_value=grok_mock),
         patch("bridge.video_dispatcher.ComfyUIClient", return_value=cu_mock),
     ):

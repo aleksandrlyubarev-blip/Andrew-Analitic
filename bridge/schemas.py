@@ -318,22 +318,39 @@ class GrokVideoRequest(BaseModel):
     end_frame_url: Optional[str] = None
 
 
+class VeoVideoRequest(BaseModel):
+    """Per-scene generation request for Google Veo 3.1 API (AI Studio / Vertex)."""
+
+    scene_id: str = ""
+    prompt: str
+    negative_prompt: str = "worst quality, inconsistent motion, blurry, jittery, distorted"
+    duration_sec: int = 8
+    fps: int = 24
+    resolution: str = "1920x1080"
+    aspect_ratio: str = "16:9"
+    seed: Optional[int] = None
+    camera_motion: str = ""
+    start_frame_url: Optional[str] = None    # first frame image (GCS URI or HTTPS)
+    end_frame_url: Optional[str] = None      # last frame image
+    reference_image_urls: List[str] = Field(default_factory=list)
+
+
 class VideoDispatchRequest(BaseModel):
     """
     API body for POST /video/dispatch.
 
     Routes each scene by [MODEL: ...] tag:
-      sora2 / wan2.6 / veo3.1  → Higgsfield
-      grok4.2                   → xAI Grok 4.2
-      ltx2.3 / ""               → local ComfyUI
+      veo3.1              → Google Veo 3.1 (direct AI Studio API)
+      grok4.2 / grok-4.2 → xAI Grok 4.2
+      ltx2.3 / ""         → local ComfyUI
     """
 
     project_id: str
     scenario_text: str
     config: LtxGenerationConfig = Field(default_factory=LtxGenerationConfig)
-    higgsfield_api_key: Optional[str] = None   # falls back to HIGGSFIELD_API_KEY
-    higgsfield_timeout_sec: float = 900.0
-    xai_api_key: Optional[str] = None          # falls back to XAI_API_KEY
+    google_api_key: Optional[str] = None     # falls back to GOOGLE_API_KEY
+    veo_timeout_sec: float = 900.0
+    xai_api_key: Optional[str] = None        # falls back to XAI_API_KEY
     grok_timeout_sec: float = 900.0
     comfyui_host: str = "http://127.0.0.1:8188"
     comfyui_timeout_sec: float = 600.0
