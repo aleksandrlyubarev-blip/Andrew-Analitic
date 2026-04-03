@@ -358,7 +358,35 @@ class ConsolidationEngine:
         return result
 
 
+# ── Store factory ─────────────────────────────────────────────────────────────
+
+def get_semantic_store(mongo_uri: Optional[str] = None):
+    """
+    Return the appropriate semantic store backend.
+
+    When MONGODB_URI is set (or mongo_uri is provided), returns a
+    MongoDBSemanticStore for persistent, cross-restart memory.
+    Falls back to InProcessSemanticStore when MongoDB is not configured.
+    """
+    import os
+    uri = mongo_uri or os.getenv("MONGODB_URI", "")
+    if uri:
+        try:
+            from core.mongodb_store import MongoDBSemanticStore
+            db_name = os.getenv("MONGODB_DB", "romeoflexvision")
+            store = MongoDBSemanticStore(mongo_uri=uri, db_name=db_name)
+            logger.info("Semantic store: MongoDB backend active")
+            return store
+        except Exception as exc:
+            logger.warning(
+                f"MongoDBSemanticStore init failed ({exc}); "
+                "falling back to in-process store"
+            )
+    logger.info("Semantic store: in-process backend (volatile)")
+    return InProcessSemanticStore()
+
+
 # ── Module-level singletons ───────────────────────────────────────────────────
 
-_semantic_store = InProcessSemanticStore()
+_semantic_store = get_semantic_store()
 _consolidation_engine = ConsolidationEngine(store=_semantic_store)

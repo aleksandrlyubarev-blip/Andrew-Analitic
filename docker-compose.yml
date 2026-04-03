@@ -47,6 +47,9 @@ services:
       ANDREW_MAX_COST: "${ANDREW_MAX_COST:-1.00}"
       HITL_CONFIDENCE_THRESHOLD: "${HITL_CONFIDENCE_THRESHOLD:-0.35}"
       MODEL_ROMEO: "${MODEL_ROMEO:-gpt-4o-mini}"
+      # MongoDB — leave blank to use in-process memory (no persistence)
+      MONGODB_URI: "${MONGODB_URI:-}"
+      MONGODB_DB: "${MONGODB_DB:-romeoflexvision}"
     volumes: ["andrew-data:/data"]
     depends_on:
       moltis:
@@ -58,6 +61,25 @@ services:
       retries: 3
       start_period: 20s
 
+  # Local MongoDB — enable with: docker compose --profile mongodb up
+  # For production use MongoDB Atlas instead (free M0 tier available).
+  mongodb:
+    image: mongo:7.0
+    container_name: andrew-mongodb
+    restart: unless-stopped
+    init: true
+    ports: ["27017:27017"]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: andrew
+      MONGO_INITDB_ROOT_PASSWORD: "${MONGO_PASSWORD:?Set MONGO_PASSWORD in .env}"
+      MONGO_INITDB_DATABASE: romeoflexvision
+    volumes: ["mongo-data:/data/db"]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    profiles: [mongodb]
 
   postgres:
     image: postgres:16-alpine
@@ -83,3 +105,4 @@ volumes:
   moltis-data:
   andrew-data:
   pg-data:
+  mongo-data:
