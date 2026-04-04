@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from core.andrew_swarm import AndrewExecutor
 from core.orchestration import ToolCall
 from core.supervisor import SwarmSupervisor
+from core.tools import FileReadTool
 
 
 def _sqlite_fixture() -> tuple[str, dict[str, dict[str, str]]]:
@@ -52,6 +53,28 @@ def test_andrew_executor_exposes_foundation_tools():
     executor = AndrewExecutor()
 
     assert executor.available_tools() == ["file_read", "python_exec", "sql_query"]
+
+
+@pytest.mark.asyncio
+async def test_andrew_executor_default_tool_context_blocks_reads_outside_repo():
+    executor = AndrewExecutor()
+    tool = FileReadTool()
+    repo_root = Path(__file__).resolve().parents[1]
+    ctx = executor.build_tool_context()
+
+    assert Path(ctx.working_directory) == repo_root
+
+    with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as handle:
+        handle.write("outside")
+        outside_path = Path(handle.name)
+
+    try:
+        result = await tool.run({"path": str(outside_path)}, ctx)
+    finally:
+        outside_path.unlink(missing_ok=True)
+
+    assert result.success is False
+    assert "outside working directory" in (result.error or "")
 
 
 def test_andrew_executor_run_tool_calls_sync_executes_runtime_plan():

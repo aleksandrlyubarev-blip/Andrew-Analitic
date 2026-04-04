@@ -100,6 +100,14 @@ class SQLQueryTool(AbstractTool[SQLQueryInput, list[dict[str, Any]]]):
                 metadata={"stage": "validate_sql"},
             )
 
+        state.update(
+            {
+                "sql_query": validated.get("sql_query", state["sql_query"]),
+                "sql_validated": validated.get("sql_validated", False),
+                "error_message": validated.get("error_message", ""),
+            }
+        )
+
         executed = execute_sql_load_df(state)
         if executed.get("error_message"):
             return ToolResult(

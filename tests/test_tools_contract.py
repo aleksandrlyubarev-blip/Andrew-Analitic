@@ -13,6 +13,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from core.tools import FileReadTool, PythonExecTool, SQLQueryTool, ToolUseContext
+import core.tools.sql_query as sql_query_module
 
 
 def _sqlite_fixture() -> tuple[str, dict[str, dict[str, str]]]:
@@ -90,6 +91,36 @@ async def test_sql_tool_call_happy_path_returns_rows():
     assert len(result.output) == 3
     assert result.metadata["row_count"] == 3
     assert "EU" in (result.output_to_model or "")
+
+
+@pytest.mark.asyncio
+async def test_sql_tool_executes_validated_query_output(monkeypatch):
+    tool = SQLQueryTool()
+    ctx = ToolUseContext(db_url="sqlite:///ignored.db", schema_context={"sales": {"id": "int"}})
+    captured: dict[str, str] = {}
+
+    def fake_validate_sql(state):
+        return {
+            "sql_query": "SELECT sales.id FROM sales ORDER BY sales.id",
+            "sql_validated": True,
+            "error_message": "",
+        }
+
+    def fake_execute_sql_load_df(state):
+        captured["sql_query"] = state["sql_query"]
+        return {
+            "query_results": [{"id": 1}],
+            "sql_result_path": "/tmp/andrew_sql_result.csv",
+            "error_message": "",
+        }
+
+    monkeypatch.setattr(sql_query_module, "validate_sql", fake_validate_sql)
+    monkeypatch.setattr(sql_query_module, "execute_sql_load_df", fake_execute_sql_load_df)
+
+    result = await tool.run({"query": "SELECT id FROM sales"}, ctx)
+
+    assert result.success is True
+    assert captured["sql_query"] == "SELECT sales.id FROM sales ORDER BY sales.id"
 
 
 @pytest.mark.asyncio

@@ -21,6 +21,7 @@ import re
 import tempfile
 import time
 from dataclasses import dataclass, field as dc_field
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, TypedDict
 
 import pandas as pd
@@ -1238,10 +1239,12 @@ class AndrewExecutor:
     ):
         from core.tools import ToolUseContext
 
+        workspace_root = working_directory or str(Path(__file__).resolve().parents[1])
+
         return ToolUseContext(
             db_url=self.db_url,
             schema_context=self.schema,
-            working_directory=working_directory,
+            working_directory=workspace_root,
             metadata=metadata or {},
             available_tools=self.tool_registry,
         )
