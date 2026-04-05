@@ -50,18 +50,28 @@ _GROK_MODELS = frozenset({"grok4.2", "grok-4.2", "grok4", "grok-4"})
 
 class VideoDispatcher:
     """
-    Dispatch a batch of LtxSceneJobs to Higgsfield or ComfyUI in parallel.
+    Dispatch a batch of LtxSceneJobs to the appropriate backend in parallel.
+
+    Routing:
+        veo3.1 / veo-3.1   → Google Veo 3.1  (AI Studio LRO)
+        grok4.2 / grok-4.2 → xAI Grok 4.2
+        anything else       → local ComfyUI
 
     Parameters
     ----------
-    higgsfield_api_key:
-        Higgsfield API key (falls back to env HIGGSFIELD_API_KEY).
+    google_api_key:
+        Google AI Studio key for Veo 3.1.
+    xai_api_key:
+        xAI key for Grok 4.2.
     comfyui_host:
         Base URL of the local ComfyUI instance.
-    higgsfield_timeout_sec / comfyui_timeout_sec:
+    veo_timeout_sec / grok_timeout_sec / comfyui_timeout_sec:
         Per-job timeouts for each backend.
+    fallback_to_comfyui:
+        If True (default), a cloud backend failure automatically retries
+        the scene on local ComfyUI before marking it as ERROR.
     max_concurrent:
-        Max parallel in-flight jobs across both backends.
+        Max parallel in-flight jobs across all backends.
     """
 
     def __init__(
@@ -72,6 +82,7 @@ class VideoDispatcher:
         veo_timeout_sec: float = 900.0,
         grok_timeout_sec: float = 900.0,
         comfyui_timeout_sec: float = 600.0,
+        fallback_to_comfyui: bool = True,
         max_concurrent: int = 4,
     ) -> None:
         self._google_key = google_api_key
@@ -80,6 +91,7 @@ class VideoDispatcher:
         self._veo_timeout = veo_timeout_sec
         self._grok_timeout = grok_timeout_sec
         self._cu_timeout = comfyui_timeout_sec
+        self._fallback = fallback_to_comfyui
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._exporter = ComfyUIWorkflowExporter()
 
@@ -137,9 +149,23 @@ class VideoDispatcher:
         async with self._semaphore:
             model = job.preferred_model.strip().lower()
             if model in _VEO_MODELS:
-                return await self._run_veo(job, config, veo_client)
+                result = await self._run_veo(job, config, veo_client)
+                if result.status != ComfyUIJobStatus.SUCCESS and self._fallback:
+                    logger.warning(
+                        "Veo failed for %s (%s) — falling back to ComfyUI",
+                        job.scene_id, result.error,
+                    )
+                    return await self._run_comfyui(job, config, cu_client)
+                return result
             if model in _GROK_MODELS:
-                return await self._run_grok(job, config, grok_client)
+                result = await self._run_grok(job, config, grok_client)
+                if result.status != ComfyUIJobStatus.SUCCESS and self._fallback:
+                    logger.warning(
+                        "Grok failed for %s (%s) — falling back to ComfyUI",
+                        job.scene_id, result.error,
+                    )
+                    return await self._run_comfyui(job, config, cu_client)
+                return result
             return await self._run_comfyui(job, config, cu_client)
 
     async def _run_veo(
@@ -274,5 +300,6 @@ async def dispatch_scenario(req: VideoDispatchRequest) -> ComfyUIBatchResult:
         veo_timeout_sec=req.veo_timeout_sec,
         grok_timeout_sec=req.grok_timeout_sec,
         comfyui_timeout_sec=req.comfyui_timeout_sec,
+        fallback_to_comfyui=req.fallback_to_comfyui,
     )
     return await dispatcher.dispatch_batch(job_response.scene_jobs, req.config)

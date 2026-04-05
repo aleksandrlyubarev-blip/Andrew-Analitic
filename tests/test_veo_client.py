@@ -451,7 +451,7 @@ async def test_w4_veo_error_in_batch():
         patch("bridge.video_dispatcher.GrokVideoClient", return_value=grok_mock),
         patch("bridge.video_dispatcher.ComfyUIClient", return_value=cu_mock),
     ):
-        dispatcher = VideoDispatcher(google_api_key="gkey")
+        dispatcher = VideoDispatcher(google_api_key="gkey", fallback_to_comfyui=False)
         result = await dispatcher.dispatch_batch([job], LtxGenerationConfig())
 
     assert result.failed == 1

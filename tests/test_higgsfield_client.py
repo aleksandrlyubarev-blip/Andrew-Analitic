@@ -493,7 +493,7 @@ async def test_d6_veo_error_captured_in_result():
         patch("bridge.video_dispatcher.GrokVideoClient", return_value=_make_mock_grok_client()),
         patch("bridge.video_dispatcher.ComfyUIClient", return_value=cu_mock),
     ):
-        dispatcher = VideoDispatcher(google_api_key="gkey")
+        dispatcher = VideoDispatcher(google_api_key="gkey", fallback_to_comfyui=False)
         result = await dispatcher.dispatch_batch([job], LtxGenerationConfig())
 
     assert result.failed == 1
@@ -533,7 +533,7 @@ async def test_d7_batch_counts_accurate():
         patch("bridge.video_dispatcher.GrokVideoClient", return_value=grok_mock),
         patch("bridge.video_dispatcher.ComfyUIClient", return_value=cu_mock),
     ):
-        dispatcher = VideoDispatcher(google_api_key="gkey", xai_api_key="xkey")
+        dispatcher = VideoDispatcher(google_api_key="gkey", xai_api_key="xkey", fallback_to_comfyui=False)
         result = await dispatcher.dispatch_batch(jobs, LtxGenerationConfig())
 
     assert result.total == 3

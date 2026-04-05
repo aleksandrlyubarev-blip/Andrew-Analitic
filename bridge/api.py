@@ -321,14 +321,17 @@ async def dispatch_video(request: Request, req: VideoDispatchRequest):
     """
     Smart dispatcher: parse scenario → route each scene by [MODEL: ...] tag.
 
-    Scenes tagged ``[MODEL: sora2 / wan2.6 / veo3.1]`` go to **Higgsfield**.
-    Scenes tagged ``[MODEL: ltx2.3]`` or with no MODEL tag go to **local ComfyUI**.
+    Routing table:
 
-    Both backends run concurrently (max 4 parallel jobs).
-    Returns a unified ComfyUIBatchResult with per-scene status and output URLs.
+    * ``[MODEL: veo3.1]``  → Google Veo 3.1 (AI Studio LRO)
+    * ``[MODEL: grok4.2]`` → xAI Grok 4.2
+    * ``[MODEL: ltx2.3]`` or no tag → local ComfyUI
 
-    Set ``higgsfield_api_key`` in the request body or the ``HIGGSFIELD_API_KEY``
-    environment variable before calling this endpoint.
+    All backends run concurrently (max 4 parallel jobs per batch).
+    If ``fallback_to_comfyui`` is set, a cloud failure automatically retries
+    the scene locally before marking it ERROR.
+
+    Returns a unified ``ComfyUIBatchResult`` with per-scene status and output URLs.
     """
     return await dispatch_scenario(req)
 

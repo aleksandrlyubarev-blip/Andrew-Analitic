@@ -430,7 +430,7 @@ async def test_r4_grok_error_in_batch():
         patch("bridge.video_dispatcher.GrokVideoClient", return_value=grok_mock),
         patch("bridge.video_dispatcher.ComfyUIClient", return_value=cu_mock),
     ):
-        dispatcher = VideoDispatcher(xai_api_key="xai-key")
+        dispatcher = VideoDispatcher(xai_api_key="xai-key", fallback_to_comfyui=False)
         result = await dispatcher.dispatch_batch([job], LtxGenerationConfig())
 
     assert result.failed == 1

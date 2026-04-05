@@ -354,3 +354,4 @@ class VideoDispatchRequest(BaseModel):
     grok_timeout_sec: float = 900.0
     comfyui_host: str = "http://127.0.0.1:8188"
     comfyui_timeout_sec: float = 600.0
+    fallback_to_comfyui: bool = True         # retry cloud failures on local ComfyUI
