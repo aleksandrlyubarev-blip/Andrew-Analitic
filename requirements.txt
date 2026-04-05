@@ -19,3 +19,5 @@ pytest-asyncio>=0.23.0
 pymongo>=4.7.0
 motor>=3.4.0
 langgraph-checkpoint-mongodb>=2.0.0
+# Test dependency — mocks MongoDB server in-process (no real server needed)
+mongomock>=4.1.0

@@ -276,6 +276,12 @@ class MongoDBSemanticStore:
         )
         logger.debug(f"MongoDBSemanticStore: tombstoned {record_id}")
 
+    def set_stale_flag(self, record_id: str, value: bool) -> None:
+        self._col.update_one(
+            {"record_id": record_id},
+            {"$set": {"stale_flagged": value}},
+        )
+
     def __len__(self) -> int:
         return self._col.count_documents({"tombstoned": False})
 

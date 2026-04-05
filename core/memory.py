@@ -165,6 +165,12 @@ class InProcessSemanticStore:
                 rec.tombstoned = True
                 logger.debug(f"SemanticStore: tombstoned {record_id}")
 
+    def set_stale_flag(self, record_id: str, value: bool) -> None:
+        with self._lock:
+            rec = self._records.get(record_id)
+            if rec:
+                rec.stale_flagged = value
+
     def __len__(self) -> int:
         with self._lock:
             return sum(1 for r in self._records.values() if not r.tombstoned)
@@ -341,7 +347,7 @@ class ConsolidationEngine:
                         f"(idle={idle:.1f}d)"
                     )
             elif idle >= ttl_days:
-                rec.stale_flagged = True
+                self.store.set_stale_flag(rec.record_id, True)
                 newly_flagged += 1
                 logger.info(
                     f"staleness_sweep: flagged {rec.record_id} "
