@@ -19,7 +19,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+import os
+from typing import Any, Callable
 
 from bridge.comfyui_client import ComfyUIClient
 from bridge.comfyui_export import ComfyUIWorkflowExporter
@@ -85,8 +86,9 @@ class VideoDispatcher:
         fallback_to_comfyui: bool = True,
         max_concurrent: int = 4,
     ) -> None:
-        self._google_key = google_api_key
-        self._xai_key = xai_api_key
+        # Env-var fallbacks so callers don't need to pass keys explicitly
+        self._google_key = google_api_key or os.getenv("GOOGLE_API_KEY")
+        self._xai_key = xai_api_key or os.getenv("XAI_API_KEY")
         self._comfyui_host = comfyui_host
         self._veo_timeout = veo_timeout_sec
         self._grok_timeout = grok_timeout_sec
@@ -101,9 +103,16 @@ class VideoDispatcher:
         self,
         jobs: list[LtxSceneJob],
         config: LtxGenerationConfig,
+        on_scene_done: Callable[[ComfyUISubmitResult], None] | None = None,
     ) -> ComfyUIBatchResult:
         """
         Dispatch all jobs concurrently; route each one by preferred_model.
+
+        Parameters
+        ----------
+        on_scene_done:
+            Optional callback invoked after each scene finishes (any status).
+            Called from within the asyncio event loop; keep it non-blocking.
 
         Returns a ComfyUIBatchResult with per-scene results.
         """
@@ -122,7 +131,8 @@ class VideoDispatcher:
             ) as cu_client,
         ):
             tasks = [
-                self._dispatch_one(job, config, veo_client, grok_client, cu_client)
+                self._dispatch_one(job, config, veo_client, grok_client, cu_client,
+                                   on_scene_done=on_scene_done)
                 for job in jobs
             ]
             results: list[ComfyUISubmitResult] = await asyncio.gather(*tasks)
@@ -145,6 +155,7 @@ class VideoDispatcher:
         veo_client: VeoVideoClient,
         grok_client: GrokVideoClient,
         cu_client: ComfyUIClient,
+        on_scene_done: Callable[[ComfyUISubmitResult], None] | None = None,
     ) -> ComfyUISubmitResult:
         async with self._semaphore:
             model = job.preferred_model.strip().lower()
@@ -155,18 +166,21 @@ class VideoDispatcher:
                         "Veo failed for %s (%s) — falling back to ComfyUI",
                         job.scene_id, result.error,
                     )
-                    return await self._run_comfyui(job, config, cu_client)
-                return result
-            if model in _GROK_MODELS:
+                    result = await self._run_comfyui(job, config, cu_client)
+            elif model in _GROK_MODELS:
                 result = await self._run_grok(job, config, grok_client)
                 if result.status != ComfyUIJobStatus.SUCCESS and self._fallback:
                     logger.warning(
                         "Grok failed for %s (%s) — falling back to ComfyUI",
                         job.scene_id, result.error,
                     )
-                    return await self._run_comfyui(job, config, cu_client)
-                return result
-            return await self._run_comfyui(job, config, cu_client)
+                    result = await self._run_comfyui(job, config, cu_client)
+            else:
+                result = await self._run_comfyui(job, config, cu_client)
+
+            if on_scene_done is not None:
+                on_scene_done(result)
+            return result
 
     async def _run_veo(
         self,
@@ -275,7 +289,10 @@ class VideoDispatcher:
 # ── convenience facade ────────────────────────────────────────────────────────
 
 
-async def dispatch_scenario(req: VideoDispatchRequest) -> ComfyUIBatchResult:
+async def dispatch_scenario(
+    req: VideoDispatchRequest,
+    on_scene_done: Callable[[ComfyUISubmitResult], None] | None = None,
+) -> ComfyUIBatchResult:
     """
     Full pipeline: scenario text → parse → dispatch → results.
 
@@ -302,4 +319,6 @@ async def dispatch_scenario(req: VideoDispatchRequest) -> ComfyUIBatchResult:
         comfyui_timeout_sec=req.comfyui_timeout_sec,
         fallback_to_comfyui=req.fallback_to_comfyui,
     )
-    return await dispatcher.dispatch_batch(job_response.scene_jobs, req.config)
+    return await dispatcher.dispatch_batch(
+        job_response.scene_jobs, req.config, on_scene_done=on_scene_done
+    )

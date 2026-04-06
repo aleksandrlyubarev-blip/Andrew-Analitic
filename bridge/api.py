@@ -17,6 +17,9 @@ import sys
 from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional
 
+from dotenv import load_dotenv
+load_dotenv()  # pick up .env before any os.getenv calls
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -45,6 +48,8 @@ from bridge.schemas import (
     VideoDispatchRequest,
 )
 from bridge.video_dispatcher import dispatch_scenario
+from bridge.job_store import VideoJobRecord, VideoJobStatus, VideoJobStore
+from bridge.cost_estimator import BatchCostEstimate, CostEstimator
 from bridge.service import AndrewMoltisBridge
 
 logger = logging.getLogger("bridge_api")
@@ -334,6 +339,81 @@ async def dispatch_video(request: Request, req: VideoDispatchRequest):
     Returns a unified ``ComfyUIBatchResult`` with per-scene status and output URLs.
     """
     return await dispatch_scenario(req)
+
+
+@app.post("/video/jobs", response_model=VideoJobRecord)
+@limiter.limit("3/minute")
+async def create_video_job(request: Request, req: VideoDispatchRequest):
+    """
+    Async variant of ``/video/dispatch``.
+
+    Immediately returns a ``VideoJobRecord`` with ``status=queued`` and a
+    ``job_id``.  The dispatch runs in the background; poll
+    ``GET /video/jobs/{job_id}`` to track progress.
+    """
+    from bridge.ltx_video import LtxVideoPipeline
+    from bridge.schemas import LtxVideoJobRequest
+
+    # Parse scenario to know total scene count upfront
+    pipeline = LtxVideoPipeline()
+    job_response = pipeline.run(LtxVideoJobRequest(
+        project_id=req.project_id,
+        scenario_text=req.scenario_text,
+        config=req.config,
+    ))
+    scenes_total = len(job_response.scene_jobs)
+
+    store = VideoJobStore.get()
+    job_id = await store.create(scenes_total=scenes_total)
+
+    async def _run():
+        await store.start(job_id)
+        try:
+            result = await dispatch_scenario(
+                req,
+                on_scene_done=lambda _r: asyncio.create_task(store.tick(job_id)),
+            )
+            await store.complete(job_id, result)
+        except Exception as exc:
+            logger.exception("Background job %s failed", job_id)
+            await store.fail(job_id, str(exc))
+
+    import asyncio as _asyncio
+    _asyncio.create_task(_run())
+
+    record = store.get_job(job_id)
+    return record
+
+
+@app.get("/video/jobs/{job_id}", response_model=VideoJobRecord)
+async def get_video_job(job_id: str):
+    """Poll the status of an async video job."""
+    store = VideoJobStore.get()
+    record = store.get_job(job_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found")
+    return record
+
+
+@app.get("/video/jobs", response_model=list[VideoJobRecord])
+async def list_video_jobs():
+    """List all video jobs (most recent first)."""
+    return VideoJobStore.get().list_jobs()
+
+
+@app.post("/video/estimate", response_model=BatchCostEstimate)
+async def estimate_video_cost(req: VideoDispatchRequest):
+    """
+    Estimate cost and generation time for a scenario without running it.
+
+    Returns per-scene breakdown (backend, cost, estimated time) and totals.
+    """
+    estimator = CostEstimator(fallback_to_comfyui=req.fallback_to_comfyui)
+    return estimator.estimate_scenario(
+        req.scenario_text,
+        project_id=req.project_id,
+        config=req.config,
+    )
 
 
 @app.get("/video/comfyui/health")
