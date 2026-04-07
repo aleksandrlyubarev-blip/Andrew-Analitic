@@ -59,15 +59,21 @@ HIGGSFIELD_API_BASE = "https://platform.higgsfield.ai"
 # DOP tiers: lite (fastest/cheapest), standard, turbo (best quality)
 MODEL_MAP: dict[str, str] = {
     # DOP — Higgsfield's flagship i2v model
-    "dop":           "higgsfield-ai/dop/standard",
-    "dop-lite":      "higgsfield-ai/dop/lite",
-    "dop-turbo":     "higgsfield-ai/dop/turbo",
+    "dop":              "higgsfield-ai/dop/standard",
+    "dop-lite":         "higgsfield-ai/dop/lite",
+    "dop-turbo":        "higgsfield-ai/dop/turbo",
     # Kling
-    "kling2.1":      "kling-video/v2.1/standard/image-to-video",
-    "kling2.1-pro":  "kling-video/v2.1/pro/image-to-video",
-    # Seedance
-    "seedance":      "bytedance/seedance/v1/lite/image-to-video",
-    "seedance-pro":  "bytedance/seedance/v1/pro/image-to-video",
+    "kling2.1":         "kling-video/v2.1/standard/image-to-video",
+    "kling2.1-pro":     "kling-video/v2.1/pro/image-to-video",
+    # Seedance v1 (API-only tier)
+    "seedance":         "bytedance/seedance/v1/lite/image-to-video",
+    "seedance-pro":     "bytedance/seedance/v1/pro/image-to-video",
+    # Seedance v1.5 (Unlimited plan)
+    "seedance1.5-pro":  "bytedance/seedance/v1.5/pro",
+    "seedance1.5":      "bytedance/seedance/v1.5/lite",
+    # Wan 2.6 (Unlimited plan)
+    "wan2.6":           "wan/2.6/image-to-video",
+    "wan2.6-t2v":       "wan/2.6/t2v",
 }
 
 # Terminal status values

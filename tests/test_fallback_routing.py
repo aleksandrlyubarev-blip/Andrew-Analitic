@@ -40,7 +40,7 @@ from bridge.schemas import (
     LtxSceneJob,
     VideoDispatchRequest,
 )
-from bridge.video_dispatcher import VideoDispatcher, dispatch_scenario
+from bridge.video_dispatcher import VideoDispatcher, dispatch_scenario, _is_higgsfield
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -398,3 +398,251 @@ async def test_f12_dispatch_scenario_fallback_default_true():
 
     assert result.succeeded == 1
     cu_mock.submit_and_await.assert_called_once()
+
+
+# ── HG-series: Higgsfield routing ─────────────────────────────────────────────
+# HG1.  dop model → routes to HiggsfieldClient → SUCCESS.
+# HG2.  seedance1.5-pro → routes to HiggsfieldClient → SUCCESS.
+# HG3.  Full slug (higgsfield-ai/dop/turbo) → routes to HiggsfieldClient.
+# HG4.  Full slug (bytedance/seedance/v1.5/pro) → routes to HiggsfieldClient.
+# HG5.  Higgsfield ERROR → fallback to ComfyUI → SUCCESS.
+# HG6.  Higgsfield TIMEOUT → fallback to ComfyUI → SUCCESS.
+# HG7.  Higgsfield SUCCESS → ComfyUI NOT called.
+# HG8.  fallback_to_comfyui=False: Higgsfield ERROR stays ERROR.
+# HG9.  _is_higgsfield() helper — friendly names and full slugs.
+# HG10. dispatch_scenario with Higgsfield model in scenario.
+
+
+def _make_hf_mock(result: ComfyUISubmitResult) -> AsyncMock:
+    mock = AsyncMock()
+    mock.__aenter__ = AsyncMock(return_value=mock)
+    mock.__aexit__ = AsyncMock(return_value=False)
+    mock.submit_and_await = AsyncMock(return_value=result)
+    return mock
+
+
+@pytest.mark.asyncio
+async def test_hg1_dop_routes_to_higgsfield():
+    job = _make_job("dop", "scene_01")
+    hf_mock = _make_hf_mock(_ok_result("scene_01", "hf"))
+    cu_mock = _make_client(_ok_result("scene_01", "cu"))
+
+    with (
+        patch("bridge.video_dispatcher.VeoVideoClient",
+              return_value=_make_client(_ok_result())),
+        patch("bridge.video_dispatcher.GrokVideoClient",
+              return_value=_make_client(_ok_result())),
+        patch("bridge.video_dispatcher.HiggsfieldClient", return_value=hf_mock),
+        patch("bridge.video_dispatcher.ComfyUIClient", return_value=cu_mock),
+    ):
+        dispatcher = VideoDispatcher(hf_key="id:secret", fallback_to_comfyui=False)
+        result = await dispatcher.dispatch_batch([job], LtxGenerationConfig())
+
+    assert result.succeeded == 1
+    hf_mock.submit_and_await.assert_called_once()
+    cu_mock.submit_and_await.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_hg2_seedance15_pro_routes_to_higgsfield():
+    job = _make_job("seedance1.5-pro", "scene_02")
+    hf_mock = _make_hf_mock(_ok_result("scene_02", "hf"))
+    cu_mock = _make_client(_ok_result("scene_02", "cu"))
+
+    with (
+        patch("bridge.video_dispatcher.VeoVideoClient",
+              return_value=_make_client(_ok_result())),
+        patch("bridge.video_dispatcher.GrokVideoClient",
+              return_value=_make_client(_ok_result())),
+        patch("bridge.video_dispatcher.HiggsfieldClient", return_value=hf_mock),
+        patch("bridge.video_dispatcher.ComfyUIClient", return_value=cu_mock),
+    ):
+        dispatcher = VideoDispatcher(hf_key="id:secret", fallback_to_comfyui=False)
+        result = await dispatcher.dispatch_batch([job], LtxGenerationConfig())
+
+    assert result.succeeded == 1
+    hf_mock.submit_and_await.assert_called_once()
+    cu_mock.submit_and_await.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_hg3_full_slug_higgsfield_ai_routes_to_higgsfield():
+    job = _make_job("higgsfield-ai/dop/turbo", "scene_03")
+    hf_mock = _make_hf_mock(_ok_result("scene_03", "hf"))
+    cu_mock = _make_client(_ok_result("scene_03", "cu"))
+
+    with (
+        patch("bridge.video_dispatcher.VeoVideoClient",
+              return_value=_make_client(_ok_result())),
+        patch("bridge.video_dispatcher.GrokVideoClient",
+              return_value=_make_client(_ok_result())),
+        patch("bridge.video_dispatcher.HiggsfieldClient", return_value=hf_mock),
+        patch("bridge.video_dispatcher.ComfyUIClient", return_value=cu_mock),
+    ):
+        dispatcher = VideoDispatcher(hf_key="id:secret", fallback_to_comfyui=False)
+        result = await dispatcher.dispatch_batch([job], LtxGenerationConfig())
+
+    assert result.succeeded == 1
+    hf_mock.submit_and_await.assert_called_once()
+    cu_mock.submit_and_await.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_hg4_full_slug_bytedance_routes_to_higgsfield():
+    job = _make_job("bytedance/seedance/v1.5/pro", "scene_04")
+    hf_mock = _make_hf_mock(_ok_result("scene_04", "hf"))
+    cu_mock = _make_client(_ok_result("scene_04", "cu"))
+
+    with (
+        patch("bridge.video_dispatcher.VeoVideoClient",
+              return_value=_make_client(_ok_result())),
+        patch("bridge.video_dispatcher.GrokVideoClient",
+              return_value=_make_client(_ok_result())),
+        patch("bridge.video_dispatcher.HiggsfieldClient", return_value=hf_mock),
+        patch("bridge.video_dispatcher.ComfyUIClient", return_value=cu_mock),
+    ):
+        dispatcher = VideoDispatcher(hf_key="id:secret", fallback_to_comfyui=False)
+        result = await dispatcher.dispatch_batch([job], LtxGenerationConfig())
+
+    assert result.succeeded == 1
+    hf_mock.submit_and_await.assert_called_once()
+    cu_mock.submit_and_await.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_hg5_higgsfield_error_falls_back_to_comfyui():
+    job = _make_job("dop", "scene_01")
+    hf_mock = _make_hf_mock(_err_result("scene_01", "not enough credits"))
+    cu_mock = _make_client(_ok_result("scene_01", "cu"))
+
+    with (
+        patch("bridge.video_dispatcher.VeoVideoClient",
+              return_value=_make_client(_ok_result())),
+        patch("bridge.video_dispatcher.GrokVideoClient",
+              return_value=_make_client(_ok_result())),
+        patch("bridge.video_dispatcher.HiggsfieldClient", return_value=hf_mock),
+        patch("bridge.video_dispatcher.ComfyUIClient", return_value=cu_mock),
+    ):
+        dispatcher = VideoDispatcher(hf_key="id:secret", fallback_to_comfyui=True)
+        result = await dispatcher.dispatch_batch([job], LtxGenerationConfig())
+
+    assert result.succeeded == 1
+    hf_mock.submit_and_await.assert_called_once()
+    cu_mock.submit_and_await.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_hg6_higgsfield_timeout_falls_back_to_comfyui():
+    job = _make_job("dop-turbo", "scene_01")
+    hf_mock = _make_hf_mock(_timeout_result("scene_01"))
+    cu_mock = _make_client(_ok_result("scene_01", "cu"))
+
+    with (
+        patch("bridge.video_dispatcher.VeoVideoClient",
+              return_value=_make_client(_ok_result())),
+        patch("bridge.video_dispatcher.GrokVideoClient",
+              return_value=_make_client(_ok_result())),
+        patch("bridge.video_dispatcher.HiggsfieldClient", return_value=hf_mock),
+        patch("bridge.video_dispatcher.ComfyUIClient", return_value=cu_mock),
+    ):
+        dispatcher = VideoDispatcher(hf_key="id:secret", fallback_to_comfyui=True)
+        result = await dispatcher.dispatch_batch([job], LtxGenerationConfig())
+
+    assert result.succeeded == 1
+    cu_mock.submit_and_await.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_hg7_higgsfield_success_does_not_call_comfyui():
+    job = _make_job("dop", "scene_01")
+    hf_mock = _make_hf_mock(_ok_result("scene_01", "hf"))
+    cu_mock = _make_client(_ok_result("scene_01", "cu"))
+
+    with (
+        patch("bridge.video_dispatcher.VeoVideoClient",
+              return_value=_make_client(_ok_result())),
+        patch("bridge.video_dispatcher.GrokVideoClient",
+              return_value=_make_client(_ok_result())),
+        patch("bridge.video_dispatcher.HiggsfieldClient", return_value=hf_mock),
+        patch("bridge.video_dispatcher.ComfyUIClient", return_value=cu_mock),
+    ):
+        dispatcher = VideoDispatcher(hf_key="id:secret", fallback_to_comfyui=True)
+        result = await dispatcher.dispatch_batch([job], LtxGenerationConfig())
+
+    assert result.succeeded == 1
+    cu_mock.submit_and_await.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_hg8_no_fallback_higgsfield_error_stays_error():
+    job = _make_job("dop", "scene_01")
+    hf_mock = _make_hf_mock(_err_result("scene_01", "not enough credits"))
+    cu_mock = _make_client(_ok_result("scene_01", "cu"))
+
+    with (
+        patch("bridge.video_dispatcher.VeoVideoClient",
+              return_value=_make_client(_ok_result())),
+        patch("bridge.video_dispatcher.GrokVideoClient",
+              return_value=_make_client(_ok_result())),
+        patch("bridge.video_dispatcher.HiggsfieldClient", return_value=hf_mock),
+        patch("bridge.video_dispatcher.ComfyUIClient", return_value=cu_mock),
+    ):
+        dispatcher = VideoDispatcher(hf_key="id:secret", fallback_to_comfyui=False)
+        result = await dispatcher.dispatch_batch([job], LtxGenerationConfig())
+
+    assert result.failed == 1
+    assert result.succeeded == 0
+    assert "not enough credits" in (result.results[0].error or "")
+    cu_mock.submit_and_await.assert_not_called()
+
+
+def test_hg9_is_higgsfield_helper():
+    """_is_higgsfield() correctly classifies friendly names and full slugs."""
+    assert _is_higgsfield("dop")
+    assert _is_higgsfield("dop-lite")
+    assert _is_higgsfield("dop-turbo")
+    assert _is_higgsfield("seedance1.5-pro")
+    assert _is_higgsfield("wan2.6")
+    assert _is_higgsfield("kling2.1")
+    assert _is_higgsfield("kling2.1-pro")
+    assert _is_higgsfield("higgsfield-ai/dop/turbo")
+    assert _is_higgsfield("bytedance/seedance/v1.5/pro")
+    assert _is_higgsfield("kling-video/v2.1/pro/image-to-video")
+    assert _is_higgsfield("wan/2.6/image-to-video")
+    # Must NOT match cloud or local models
+    assert not _is_higgsfield("veo3.1")
+    assert not _is_higgsfield("grok4.2")
+    assert not _is_higgsfield("ltx2.3")
+    assert not _is_higgsfield("")
+
+
+@pytest.mark.asyncio
+async def test_hg10_dispatch_scenario_higgsfield_model():
+    scenario = """\
+## Scene 1 (0:00–0:08)
+[VISUAL: Pino walks into frame against sunset]
+[MODEL: dop]
+"""
+    req = VideoDispatchRequest(
+        project_id="test",
+        scenario_text=scenario,
+        hf_key="id:secret",
+        fallback_to_comfyui=False,
+    )
+
+    hf_mock = _make_hf_mock(_ok_result("scene_01", "hf"))
+    cu_mock = _make_client(_ok_result("scene_01", "cu"))
+
+    with (
+        patch("bridge.video_dispatcher.VeoVideoClient",
+              return_value=_make_client(_ok_result())),
+        patch("bridge.video_dispatcher.GrokVideoClient",
+              return_value=_make_client(_ok_result())),
+        patch("bridge.video_dispatcher.HiggsfieldClient", return_value=hf_mock),
+        patch("bridge.video_dispatcher.ComfyUIClient", return_value=cu_mock),
+    ):
+        result = await dispatch_scenario(req)
+
+    assert result.succeeded == 1
+    hf_mock.submit_and_await.assert_called_once()
+    cu_mock.submit_and_await.assert_not_called()

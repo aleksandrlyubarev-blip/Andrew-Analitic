@@ -6,11 +6,17 @@ the ``preferred_model`` field set by the [MODEL: ...] scenario tag.
 
 Routing table
 -------------
-preferred_model        backend
-─────────────────────  ─────────────────────────────────────────────
-veo3.1 / veo-3.1       Google Veo 3.1  → VeoVideoClient  (AI Studio)
-grok4.2 / grok-4.2     xAI Grok 4.2    → GrokVideoClient
-ltx2.3 / ltx / ""      Local ComfyUI   → ComfyUIClient
+preferred_model                    backend
+─────────────────────────────────  ─────────────────────────────────────────────
+veo3.1 / veo-3.1                   Google Veo 3.1  → VeoVideoClient  (AI Studio)
+grok4.2 / grok-4.2                 xAI Grok 4.2    → GrokVideoClient
+dop / dop-lite / dop-turbo         Higgsfield DOP  → HiggsfieldClient
+seedance / seedance-pro            Higgsfield Seedance → HiggsfieldClient
+seedance1.5-pro / seedance1.5      Higgsfield Seedance 1.5 → HiggsfieldClient
+kling2.1 / kling2.1-pro            Higgsfield Kling → HiggsfieldClient
+wan2.6 / wan2.6-t2v                Higgsfield Wan  → HiggsfieldClient
+higgsfield-ai/… / bytedance/… /…   Full Higgsfield slug → HiggsfieldClient
+ltx2.3 / ltx / ""                  Local ComfyUI   → ComfyUIClient
 
 All results are normalised to ComfyUISubmitResult so downstream
 consumers (PinoCut pickup, SceneOps QA) see a uniform interface.
@@ -25,12 +31,14 @@ from typing import Any, Callable
 from bridge.comfyui_client import ComfyUIClient
 from bridge.comfyui_export import ComfyUIWorkflowExporter
 from bridge.grok_video_client import GrokVideoClient
+from bridge.higgsfield_client import HiggsfieldClient, MODEL_MAP as _HF_MODEL_MAP
 from bridge.veo_client import VeoVideoClient
 from bridge.schemas import (
     ComfyUIBatchResult,
     ComfyUIJobStatus,
     ComfyUISubmitResult,
     GrokVideoRequest,
+    HiggsfieldGenerationRequest,
     LtxGenerationConfig,
     LtxSceneJob,
     VeoVideoRequest,
@@ -47,6 +55,24 @@ _VEO_MODELS = frozenset({"veo3.1", "veo-3.1", "veo3", "veo-3"})
 # Models routed to xAI Grok 4.2
 _GROK_MODELS = frozenset({"grok4.2", "grok-4.2", "grok4", "grok-4"})
 
+# Models routed to Higgsfield platform API — friendly aliases from MODEL_MAP
+_HIGGSFIELD_MODELS = frozenset(_HF_MODEL_MAP.keys())
+
+# Full-slug prefixes that must be sent to Higgsfield (e.g. "higgsfield-ai/dop/turbo")
+_HIGGSFIELD_SLUG_PREFIXES = (
+    "higgsfield-ai/",
+    "kling-video/",
+    "bytedance/",
+    "wan/",
+    "alibaba-cloud/",
+)
+
+
+def _is_higgsfield(model: str) -> bool:
+    return model in _HIGGSFIELD_MODELS or any(
+        model.startswith(p) for p in _HIGGSFIELD_SLUG_PREFIXES
+    )
+
 
 
 class VideoDispatcher:
@@ -54,9 +80,11 @@ class VideoDispatcher:
     Dispatch a batch of LtxSceneJobs to the appropriate backend in parallel.
 
     Routing:
-        veo3.1 / veo-3.1   → Google Veo 3.1  (AI Studio LRO)
-        grok4.2 / grok-4.2 → xAI Grok 4.2
-        anything else       → local ComfyUI
+        veo3.1 / veo-3.1        → Google Veo 3.1   (AI Studio LRO)
+        grok4.2 / grok-4.2      → xAI Grok 4.2
+        dop / seedance1.5-pro / → Higgsfield platform API
+         wan2.6 / kling2.1 / …
+        anything else            → local ComfyUI
 
     Parameters
     ----------
@@ -64,9 +92,12 @@ class VideoDispatcher:
         Google AI Studio key for Veo 3.1.
     xai_api_key:
         xAI key for Grok 4.2.
+    hf_key:
+        Higgsfield credential ``"{api_key_id}:{api_key_secret}"``.
+        Falls back to env HF_KEY / HF_API_KEY + HF_API_SECRET.
     comfyui_host:
         Base URL of the local ComfyUI instance.
-    veo_timeout_sec / grok_timeout_sec / comfyui_timeout_sec:
+    veo_timeout_sec / grok_timeout_sec / higgsfield_timeout_sec / comfyui_timeout_sec:
         Per-job timeouts for each backend.
     fallback_to_comfyui:
         If True (default), a cloud backend failure automatically retries
@@ -79,9 +110,11 @@ class VideoDispatcher:
         self,
         google_api_key: str | None = None,
         xai_api_key: str | None = None,
+        hf_key: str | None = None,
         comfyui_host: str = "http://127.0.0.1:8188",
         veo_timeout_sec: float = 900.0,
         grok_timeout_sec: float = 900.0,
+        higgsfield_timeout_sec: float = 900.0,
         comfyui_timeout_sec: float = 600.0,
         fallback_to_comfyui: bool = True,
         max_concurrent: int = 4,
@@ -89,9 +122,11 @@ class VideoDispatcher:
         # Env-var fallbacks so callers don't need to pass keys explicitly
         self._google_key = google_api_key or os.getenv("GOOGLE_API_KEY")
         self._xai_key = xai_api_key or os.getenv("XAI_API_KEY")
+        self._hf_key = hf_key  # HiggsfieldClient handles its own env fallback
         self._comfyui_host = comfyui_host
         self._veo_timeout = veo_timeout_sec
         self._grok_timeout = grok_timeout_sec
+        self._hf_timeout = higgsfield_timeout_sec
         self._cu_timeout = comfyui_timeout_sec
         self._fallback = fallback_to_comfyui
         self._semaphore = asyncio.Semaphore(max_concurrent)
@@ -125,14 +160,18 @@ class VideoDispatcher:
                 api_key=self._xai_key,
                 timeout_sec=self._grok_timeout,
             ) as grok_client,
+            HiggsfieldClient(
+                hf_key=self._hf_key,
+                timeout_sec=self._hf_timeout,
+            ) as hf_client,
             ComfyUIClient(
                 host=self._comfyui_host,
                 timeout_sec=self._cu_timeout,
             ) as cu_client,
         ):
             tasks = [
-                self._dispatch_one(job, config, veo_client, grok_client, cu_client,
-                                   on_scene_done=on_scene_done)
+                self._dispatch_one(job, config, veo_client, grok_client, hf_client,
+                                   cu_client, on_scene_done=on_scene_done)
                 for job in jobs
             ]
             results: list[ComfyUISubmitResult] = await asyncio.gather(*tasks)
@@ -154,6 +193,7 @@ class VideoDispatcher:
         config: LtxGenerationConfig,
         veo_client: VeoVideoClient,
         grok_client: GrokVideoClient,
+        hf_client: HiggsfieldClient,
         cu_client: ComfyUIClient,
         on_scene_done: Callable[[ComfyUISubmitResult], None] | None = None,
     ) -> ComfyUISubmitResult:
@@ -172,6 +212,14 @@ class VideoDispatcher:
                 if result.status != ComfyUIJobStatus.SUCCESS and self._fallback:
                     logger.warning(
                         "Grok failed for %s (%s) — falling back to ComfyUI",
+                        job.scene_id, result.error,
+                    )
+                    result = await self._run_comfyui(job, config, cu_client)
+            elif _is_higgsfield(model):
+                result = await self._run_higgsfield(job, config, hf_client)
+                if result.status != ComfyUIJobStatus.SUCCESS and self._fallback:
+                    logger.warning(
+                        "Higgsfield failed for %s (%s) — falling back to ComfyUI",
                         job.scene_id, result.error,
                     )
                     result = await self._run_comfyui(job, config, cu_client)
@@ -249,6 +297,40 @@ class VideoDispatcher:
                 error=str(exc),
             )
 
+    async def _run_higgsfield(
+        self,
+        job: LtxSceneJob,
+        config: LtxGenerationConfig,
+        client: HiggsfieldClient,
+    ) -> ComfyUISubmitResult:
+        prompt = job.prompts[0] if job.prompts else ""
+        req = HiggsfieldGenerationRequest(
+            scene_id=job.scene_id,
+            model=job.preferred_model.strip().lower(),
+            prompt=prompt,
+            duration_sec=max(1, int(job.duration_sec)),
+            fps=24,
+            resolution=config.resolution,
+            aspect_ratio=config.aspect_ratio,
+            camera_motion=job.camera_motion,
+            start_frame_url=self._keyframe_url(job, frame_type="first"),
+            end_frame_url=self._keyframe_url(job, frame_type="last"),
+        )
+        logger.info(
+            "→ Higgsfield  scene=%s  model=%s  duration=%ds",
+            job.scene_id, req.model, req.duration_sec,
+        )
+        try:
+            return await client.submit_and_await(req, timeout_sec=self._hf_timeout)
+        except Exception as exc:
+            logger.error("Higgsfield error for %s: %s", job.scene_id, exc)
+            return ComfyUISubmitResult(
+                prompt_id="",
+                scene_id=job.scene_id,
+                status=ComfyUIJobStatus.ERROR,
+                error=str(exc),
+            )
+
     async def _run_comfyui(
         self,
         job: LtxSceneJob,
@@ -313,9 +395,11 @@ async def dispatch_scenario(
     dispatcher = VideoDispatcher(
         google_api_key=req.google_api_key,
         xai_api_key=req.xai_api_key,
+        hf_key=req.hf_key,
         comfyui_host=req.comfyui_host,
         veo_timeout_sec=req.veo_timeout_sec,
         grok_timeout_sec=req.grok_timeout_sec,
+        higgsfield_timeout_sec=req.higgsfield_timeout_sec,
         comfyui_timeout_sec=req.comfyui_timeout_sec,
         fallback_to_comfyui=req.fallback_to_comfyui,
     )

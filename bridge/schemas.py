@@ -342,6 +342,7 @@ class VideoDispatchRequest(BaseModel):
     Routes each scene by [MODEL: ...] tag:
       veo3.1              → Google Veo 3.1 (direct AI Studio API)
       grok4.2 / grok-4.2 → xAI Grok 4.2
+      dop / seedance1.5-pro / wan2.6 / … → Higgsfield platform API
       ltx2.3 / ""         → local ComfyUI
     """
 
@@ -352,6 +353,8 @@ class VideoDispatchRequest(BaseModel):
     veo_timeout_sec: float = 900.0
     xai_api_key: Optional[str] = None        # falls back to XAI_API_KEY
     grok_timeout_sec: float = 900.0
+    hf_key: Optional[str] = None             # "api_key_id:api_key_secret"; falls back to HF_KEY / HF_API_KEY+HF_API_SECRET
+    higgsfield_timeout_sec: float = 900.0
     comfyui_host: str = "http://127.0.0.1:8188"
     comfyui_timeout_sec: float = 600.0
     fallback_to_comfyui: bool = True         # retry cloud failures on local ComfyUI

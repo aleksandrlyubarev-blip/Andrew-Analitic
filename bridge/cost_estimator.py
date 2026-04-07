@@ -6,12 +6,14 @@ Estimate cost and generation time for a scenario before dispatching.
 Pricing (rough estimates, updated 2025-Q1):
   Google Veo 3.1   ~$0.030 / sec of output video
   xAI Grok 4.2     ~$0.025 / sec of output video
+  Higgsfield DOP   ~$0.020 / sec of output video (DOP standard tier)
   Local ComfyUI    $0.00   (electricity only)
 
 Generation time ratios (seconds of wall-clock time per second of video):
-  Veo 3.1   ≈  60 s/s  (cloud queue + generation)
-  Grok 4.2  ≈  50 s/s  (cloud queue + generation)
-  ComfyUI   ≈ 120 s/s  (local 24 GB GPU, fp8 LTX 2.3)
+  Veo 3.1        ≈  60 s/s  (cloud queue + generation)
+  Grok 4.2       ≈  50 s/s  (cloud queue + generation)
+  Higgsfield DOP ≈  45 s/s  (cloud queue + generation)
+  ComfyUI        ≈ 120 s/s  (local 24 GB GPU, fp8 LTX 2.3)
 """
 from __future__ import annotations
 
@@ -19,34 +21,43 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from bridge.higgsfield_client import MODEL_MAP as _HF_MODEL_MAP
 from bridge.ltx_video import LtxVideoPipeline
 from bridge.schemas import LtxGenerationConfig, LtxSceneJob, LtxVideoJobRequest
 
 # ── Pricing table ─────────────────────────────────────────────────────────────
 
 _PRICE_PER_SEC: dict[str, float] = {
-    "veo":     0.030,
-    "grok":    0.025,
-    "comfyui": 0.000,
+    "veo":        0.030,
+    "grok":       0.025,
+    "higgsfield": 0.020,
+    "comfyui":    0.000,
 }
 
 # Wall-clock seconds needed to generate 1 second of output video
 _TIME_FACTOR: dict[str, float] = {
-    "veo":     60.0,
-    "grok":    50.0,
-    "comfyui": 120.0,
+    "veo":        60.0,
+    "grok":       50.0,
+    "higgsfield": 45.0,
+    "comfyui":    120.0,
 }
 
-_VEO_MODELS   = frozenset({"veo3.1", "veo-3.1", "veo3", "veo-3"})
-_GROK_MODELS  = frozenset({"grok4.2", "grok-4.2", "grok4", "grok-4"})
+_VEO_MODELS         = frozenset({"veo3.1", "veo-3.1", "veo3", "veo-3"})
+_GROK_MODELS        = frozenset({"grok4.2", "grok-4.2", "grok4", "grok-4"})
+_HIGGSFIELD_MODELS  = frozenset(_HF_MODEL_MAP.keys())
+_HIGGSFIELD_SLUG_PREFIXES = (
+    "higgsfield-ai/", "kling-video/", "bytedance/", "wan/", "alibaba-cloud/",
+)
 
 
-def _backend_key(preferred_model: str) -> Literal["veo", "grok", "comfyui"]:
+def _backend_key(preferred_model: str) -> Literal["veo", "grok", "higgsfield", "comfyui"]:
     m = preferred_model.strip().lower()
     if m in _VEO_MODELS:
         return "veo"
     if m in _GROK_MODELS:
         return "grok"
+    if m in _HIGGSFIELD_MODELS or any(m.startswith(p) for p in _HIGGSFIELD_SLUG_PREFIXES):
+        return "higgsfield"
     return "comfyui"
 
 
@@ -96,7 +107,9 @@ class CostEstimator:
         jobs: list[LtxSceneJob],
     ) -> BatchCostEstimate:
         scenes: list[SceneCostEstimate] = []
-        by_backend: dict[str, float] = {"veo": 0.0, "grok": 0.0, "comfyui": 0.0}
+        by_backend: dict[str, float] = {
+            "veo": 0.0, "grok": 0.0, "higgsfield": 0.0, "comfyui": 0.0,
+        }
 
         for job in jobs:
             bk = _backend_key(job.preferred_model)
@@ -154,9 +167,10 @@ class CostEstimator:
         lines = ["", "  Scene estimate:", "  " + "─" * 54]
         for s in est.scenes:
             backend_label = {
-                "veo": "Veo 3.1 ",
-                "grok": "Grok 4.2",
-                "comfyui": "ComfyUI ",
+                "veo":        "Veo 3.1   ",
+                "grok":       "Grok 4.2  ",
+                "higgsfield": "Higgsfield",
+                "comfyui":    "ComfyUI   ",
             }[s.backend]
             cost_str = f"${s.cost_usd:.3f}" if s.cost_usd > 0 else "free"
             lines.append(
