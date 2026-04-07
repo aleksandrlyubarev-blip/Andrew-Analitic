@@ -1,32 +1,30 @@
 """
 tests/test_higgsfield_client.py + test_video_dispatcher.py (combined)
 ======================================================================
-Tests for HiggsfieldClient and VideoDispatcher.
+Tests for HiggsfieldClient (new platform.higgsfield.ai API) and VideoDispatcher.
 
 H-series: HiggsfieldClient unit tests (mocked httpx transport).
-D-series: VideoDispatcher routing / integration tests (both backends mocked).
-
-Coverage:
-  H1.  submit() returns job_id from /v1/generation response.
-  H2.  submit() raises RuntimeError when job_id absent.
-  H3.  await_completion() returns SUCCESS on status=completed + output_url.
+  H1.  submit() returns request_id from POST /{model_slug} response.
+  H2.  submit() raises RuntimeError when request_id absent.
+  H3.  await_completion() returns SUCCESS on status=completed + video URL.
   H4.  await_completion() returns ERROR on status=failed.
   H5.  await_completion() returns TIMEOUT when deadline exceeded.
-  H6.  Unknown status keeps polling until timeout.
-  H7.  _extract_outputs() handles single output_url field.
-  H8.  _extract_outputs() handles outputs list field.
-  H9.  _build_payload() includes camera_motion when set.
-  H10. _build_payload() includes start/end frame URLs for WAN 2.6.
-  H11. _build_payload() includes reference_image_urls for Veo 3.1.
-  H12. MODEL_MAP maps sora2 → sora-2, wan2.6 → wan-2.6, veo3.1 → veo-3.1.
-  H13. HTTP 500 on /v1/generation/{id} is retried until timeout.
+  H6.  Unknown status keeps polling until a terminal status arrives.
+  H7.  _extract_outputs() handles "video" field.
+  H8.  _extract_outputs() handles "output_url" field.
+  H9.  _build_payload() maps image_url from start_frame_url.
+  H10. _build_payload() maps end_image_url from end_frame_url.
+  H11. _build_payload() includes camera_motion when set.
+  H12. MODEL_MAP maps friendly tags → Higgsfield app slugs.
+  H13. HTTP 500 on /requests/{id}/status is retried until timeout.
 
-  D1.  sora2 scene → routed to Higgsfield.
+D-series: VideoDispatcher routing / integration tests (all backends mocked).
+  D1.  veo3.1 scene → routed to Veo.
   D2.  ltx2.3 scene → routed to ComfyUI.
   D3.  empty preferred_model → routed to ComfyUI.
-  D4.  Mixed batch: some Higgsfield, some ComfyUI.
+  D4.  Mixed batch: veo3.1+grok4.2+ltx2.3+empty routes correctly.
   D5.  dispatch_scenario() parses scenario and routes correctly.
-  D6.  Higgsfield error → scene result has status=ERROR, batch counts update.
+  D6.  Veo error → captured in result (status=ERROR, batch counts update).
   D7.  dispatch_batch() result counts (succeeded / failed) are accurate.
 """
 from __future__ import annotations
@@ -55,26 +53,44 @@ from bridge.video_dispatcher import VideoDispatcher, dispatch_scenario
 
 # ── shared fixtures ───────────────────────────────────────────────────────────
 
-_JOB_ID = "hf-job-uuid-0001"
+_REQ_ID  = "d7e6c0f3-6699-4f6c-bb45-2ad7fd9158ff"
+_MODEL   = "dop"
+_SLUG    = "higgsfield-ai/dop/standard"
+_VIDEO_URL = "https://cdn.higgsfield.ai/out/clip.mp4"
 
 DEFAULT_REQ = HiggsfieldGenerationRequest(
     scene_id="scene_01",
-    model="sora2",
+    model=_MODEL,
     prompt="cinematic close-up of Pinoblanco's glowing eyes",
     duration_sec=5,
+    start_frame_url="https://imgs/frame.png",
 )
 
+# New platform API response shapes
+def _submit_ok(req_id: str = _REQ_ID) -> dict:
+    base = f"https://platform.higgsfield.ai/requests/{req_id}"
+    return {
+        "status": "queued",
+        "request_id": req_id,
+        "status_url": f"{base}/status",
+        "cancel_url": f"{base}/cancel",
+    }
 
-def _hf_success(job_id: str = _JOB_ID, url: str = "https://cdn.higgsfield.ai/out/clip.mp4") -> dict:
-    return {"job_id": job_id, "status": "completed", "output_url": url}
+
+def _status_success(req_id: str = _REQ_ID, url: str = _VIDEO_URL) -> dict:
+    return {
+        "status": "completed",
+        "request_id": req_id,
+        "video": {"url": url},
+    }
 
 
-def _hf_failed(job_id: str = _JOB_ID) -> dict:
-    return {"job_id": job_id, "status": "failed", "error": "CUDA OOM on cloud node"}
+def _status_failed(req_id: str = _REQ_ID) -> dict:
+    return {"status": "failed", "request_id": req_id, "error": "CUDA OOM on cloud node"}
 
 
-def _hf_pending(job_id: str = _JOB_ID) -> dict:
-    return {"job_id": job_id, "status": "processing"}
+def _status_queued(req_id: str = _REQ_ID) -> dict:
+    return {"status": "queued", "request_id": req_id}
 
 
 class _MockTransport(httpx.AsyncBaseTransport):
@@ -91,7 +107,7 @@ class _MockTransport(httpx.AsyncBaseTransport):
 
 
 def _make_hf_client(routes: dict) -> HiggsfieldClient:
-    client = HiggsfieldClient(api_key="test-key", poll_interval_sec=0.01)
+    client = HiggsfieldClient(hf_key="test-id:test-secret", poll_interval_sec=0.01)
     client._http = httpx.AsyncClient(
         base_url="https://mock-higgsfield.ai",
         transport=_MockTransport(routes),
@@ -125,26 +141,26 @@ def _make_scene_job(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @pytest.mark.asyncio
-async def test_h1_submit_returns_job_id():
-    routes = {"POST /v1/generation": {"job_id": _JOB_ID, "status": "queued"}}
+async def test_h1_submit_returns_request_id():
+    routes = {f"POST /{_SLUG}": _submit_ok()}
     async with _make_hf_client(routes) as client:
-        job_id = await client.submit(DEFAULT_REQ)
-    assert job_id == _JOB_ID
+        req_id = await client.submit(DEFAULT_REQ)
+    assert req_id == _REQ_ID
 
 
 @pytest.mark.asyncio
-async def test_h2_submit_raises_without_job_id():
-    routes = {"POST /v1/generation": {"status": "queued"}}
+async def test_h2_submit_raises_without_request_id():
+    routes = {f"POST /{_SLUG}": {"status": "queued"}}  # missing request_id
     async with _make_hf_client(routes) as client:
-        with pytest.raises(RuntimeError, match="no job_id"):
+        with pytest.raises(RuntimeError, match="no request_id"):
             await client.submit(DEFAULT_REQ)
 
 
 @pytest.mark.asyncio
 async def test_h3_await_completion_success():
-    routes = {f"GET /v1/generation/{_JOB_ID}": _hf_success()}
+    routes = {f"GET /requests/{_REQ_ID}/status": _status_success()}
     async with _make_hf_client(routes) as client:
-        result = await client.await_completion(_JOB_ID, scene_id="scene_01")
+        result = await client.await_completion(_REQ_ID, scene_id="scene_01")
     assert result.status == ComfyUIJobStatus.SUCCESS
     assert result.scene_id == "scene_01"
     assert len(result.output_files) == 1
@@ -153,18 +169,18 @@ async def test_h3_await_completion_success():
 
 @pytest.mark.asyncio
 async def test_h4_await_completion_error():
-    routes = {f"GET /v1/generation/{_JOB_ID}": _hf_failed()}
+    routes = {f"GET /requests/{_REQ_ID}/status": _status_failed()}
     async with _make_hf_client(routes) as client:
-        result = await client.await_completion(_JOB_ID)
+        result = await client.await_completion(_REQ_ID)
     assert result.status == ComfyUIJobStatus.ERROR
     assert "CUDA OOM" in (result.error or "")
 
 
 @pytest.mark.asyncio
 async def test_h5_await_completion_timeout():
-    routes = {f"GET /v1/generation/{_JOB_ID}": _hf_pending()}
+    routes = {f"GET /requests/{_REQ_ID}/status": _status_queued()}
     async with _make_hf_client(routes) as client:
-        result = await client.await_completion(_JOB_ID, timeout_sec=0.05)
+        result = await client.await_completion(_REQ_ID, timeout_sec=0.05)
     assert result.status == ComfyUIJobStatus.TIMEOUT
 
 
@@ -176,92 +192,87 @@ async def test_h6_unknown_status_keeps_polling():
         nonlocal call_n
         call_n += 1
         if call_n < 3:
-            return {"job_id": _JOB_ID, "status": "unknown_state"}
-        return _hf_success()
+            return {"status": "in_progress", "request_id": _REQ_ID}
+        return _status_success()
 
-    routes = {f"GET /v1/generation/{_JOB_ID}": _handler}
+    routes = {f"GET /requests/{_REQ_ID}/status": _handler}
     async with _make_hf_client(routes) as client:
-        result = await client.await_completion(_JOB_ID, timeout_sec=5.0)
+        result = await client.await_completion(_REQ_ID, timeout_sec=5.0)
     assert result.status == ComfyUIJobStatus.SUCCESS
     assert call_n >= 3
 
 
-def test_h7_extract_outputs_single_url():
+def test_h7_extract_outputs_video_field():
     client = HiggsfieldClient.__new__(HiggsfieldClient)
-    data = {"status": "completed", "output_url": "https://cdn.higgsfield.ai/scene01.mp4"}
-    files = client._extract_outputs("job1", data)
+    data = {"status": "completed", "video": {"url": "https://cdn.higgsfield.ai/scene01.mp4"}}
+    files = client._extract_outputs("req1", data)
     assert len(files) == 1
     assert files[0].filename == "scene01.mp4"
     assert files[0].url == "https://cdn.higgsfield.ai/scene01.mp4"
 
 
-def test_h8_extract_outputs_list():
+def test_h8_extract_outputs_fallback_output_url():
     client = HiggsfieldClient.__new__(HiggsfieldClient)
-    data = {
-        "status": "completed",
-        "outputs": [
-            {"url": "https://cdn.higgsfield.ai/s1.mp4", "type": "video"},
-            {"url": "https://cdn.higgsfield.ai/s2.mp4", "type": "video"},
-        ],
-    }
-    files = client._extract_outputs("job1", data)
-    assert len(files) == 2
-    assert {f.filename for f in files} == {"s1.mp4", "s2.mp4"}
+    data = {"status": "completed", "output_url": "https://cdn.higgsfield.ai/scene01.mp4"}
+    files = client._extract_outputs("req1", data)
+    assert len(files) == 1
+    assert files[0].url == "https://cdn.higgsfield.ai/scene01.mp4"
 
 
-def test_h9_build_payload_camera_motion():
-    client = HiggsfieldClient(api_key="x")
+def test_h9_build_payload_image_url():
+    client = HiggsfieldClient(hf_key="k:s")
     req = HiggsfieldGenerationRequest(
-        model="sora2", prompt="test", camera_motion="ultra-slow push-in zoom"
+        model="dop",
+        prompt="test",
+        start_frame_url="https://imgs/first.png",
     )
     payload = client._build_payload(req)
-    assert payload["camera_motion"] == "ultra-slow push-in zoom"
+    assert payload["image_url"] == "https://imgs/first.png"
 
 
-def test_h10_build_payload_start_end_frames():
-    client = HiggsfieldClient(api_key="x")
+def test_h10_build_payload_end_image_url():
+    client = HiggsfieldClient(hf_key="k:s")
     req = HiggsfieldGenerationRequest(
-        model="wan2.6",
+        model="dop",
         prompt="test",
         start_frame_url="https://imgs/first.png",
         end_frame_url="https://imgs/last.png",
     )
     payload = client._build_payload(req)
-    assert payload["start_frame_url"] == "https://imgs/first.png"
-    assert payload["end_frame_url"] == "https://imgs/last.png"
+    assert payload["end_image_url"] == "https://imgs/last.png"
 
 
-def test_h11_build_payload_reference_images():
-    client = HiggsfieldClient(api_key="x")
+def test_h11_build_payload_camera_motion():
+    client = HiggsfieldClient(hf_key="k:s")
     req = HiggsfieldGenerationRequest(
-        model="veo3.1",
-        prompt="test",
-        reference_image_urls=["https://imgs/ref1.png", "https://imgs/ref2.png"],
+        model="dop", prompt="test", camera_motion="slow push-in"
     )
     payload = client._build_payload(req)
-    assert payload["reference_image_urls"] == ["https://imgs/ref1.png", "https://imgs/ref2.png"]
+    assert payload["camera_motion"] == "slow push-in"
 
 
 def test_h12_model_map():
-    assert MODEL_MAP["sora2"] == "sora-2"
-    assert MODEL_MAP["wan2.6"] == "wan-2.6"
-    assert MODEL_MAP["veo3.1"] == "veo-3.1"
+    assert MODEL_MAP["dop"]          == "higgsfield-ai/dop/standard"
+    assert MODEL_MAP["dop-lite"]     == "higgsfield-ai/dop/lite"
+    assert MODEL_MAP["dop-turbo"]    == "higgsfield-ai/dop/turbo"
+    assert MODEL_MAP["kling2.1"]     == "kling-video/v2.1/standard/image-to-video"
+    assert MODEL_MAP["seedance"]     == "bytedance/seedance/v1/lite/image-to-video"
 
 
 @pytest.mark.asyncio
 async def test_h13_http_500_retried_until_timeout():
     class _ErrTransport(httpx.AsyncBaseTransport):
         async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-            if "/v1/generation/" in request.url.path and request.method == "GET":
+            if "/requests/" in request.url.path and request.method == "GET":
                 return httpx.Response(500, text="Server Error")
-            return httpx.Response(200, json={"job_id": _JOB_ID})
+            return httpx.Response(200, json=_submit_ok())
 
-    client = HiggsfieldClient(api_key="x", poll_interval_sec=0.01)
+    client = HiggsfieldClient(hf_key="k:s", poll_interval_sec=0.01)
     client._http = httpx.AsyncClient(
         base_url="https://mock-hf.ai", transport=_ErrTransport()
     )
     async with client:
-        result = await client.await_completion(_JOB_ID, timeout_sec=0.1)
+        result = await client.await_completion(_REQ_ID, timeout_sec=0.1)
     assert result.status == ComfyUIJobStatus.TIMEOUT
 
 
