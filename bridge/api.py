@@ -23,9 +23,12 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
+from bridge.ace_step import AceStepMusicPipeline
 from bridge.client import MoltisConfig
 from bridge.scene_ops import build_demo_scene_ops_request
 from bridge.schemas import (
+    AceStepMusicRequest,
+    AceStepMusicResponse,
     AnalyzeRequest,
     AnalyzeResponse,
     HealthResponse,
@@ -181,6 +184,25 @@ async def demo_scene_ops():
     return SceneOpsSnapshotResponse(
         **{k: v for k, v in result.items() if k in SceneOpsSnapshotResponse.model_fields}
     )
+
+
+@app.post("/music/generate", response_model=AceStepMusicResponse)
+@limiter.limit("10/minute")
+async def generate_music(request: Request, req: AceStepMusicRequest):
+    """
+    Parse a scenario text and emit an ACE-Step 1.5 XL music job queue.
+
+    Accepts [MUSIC/STYLE/LYRICS/AUDIO] tags alongside — or instead of — the
+    [VISUAL/STYLE/AUDIO] tags used by the LTX video pipeline.  Pass the same
+    project_id as a paired /ltx/generate call to keep video and music jobs
+    aligned by project.
+
+    Returns one AceStepJob per parsed scene/segment, each with a ready-to-submit
+    descriptor for the ACE-Step 1.5 XL local runtime or Hugging Face Spaces.
+    """
+    pipeline = AceStepMusicPipeline()
+    response = pipeline.run(req)
+    return response
 
 
 @app.post("/webhook/moltis")

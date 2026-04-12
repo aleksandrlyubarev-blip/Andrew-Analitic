@@ -219,3 +219,81 @@ class LtxVideoJobResponse(BaseModel):
     comfyui_queue_ready: bool = True
     estimated_vram_gb: float = 0.0
     warnings: List[str] = Field(default_factory=list)
+
+
+# ── ACE-Step 1.5 XL music generation ─────────────────────────────────────────
+
+class AceStepGenerationConfig(BaseModel):
+    """Hardware/quality config for an ACE-Step 1.5 XL generation run.
+
+    Three model variants:
+      xl_base   — full flexibility, suitable for fine-tuning and cover/style tasks.
+      xl_sft    — supervised fine-tune, highest audio quality via CFG.
+      xl_turbo  — distilled to 8 steps, fastest generation.
+
+    VRAM guidance (bf16 weights, no quantisation):
+      xl_base / xl_sft  → ~9 GB (requires ≥12 GB with offload; ≥20 GB without).
+      xl_turbo          → same weight size but fewer steps ⇒ faster, not smaller.
+    Quantisation (int8/fp8) halves effective weight size.
+    """
+
+    model_variant: str = "xl_sft"          # "xl_base" | "xl_sft" | "xl_turbo"
+    use_quantisation: bool = True           # int8/fp8 quantisation for low-VRAM
+    use_offload: bool = True               # CPU offload to fit in ≤12 GB
+    vram_budget_gb: int = 12
+    inference_steps: int = 25              # xl_turbo overrides this to 8
+    guidance_scale: float = 7.0            # CFG scale (xl_sft benefits most)
+    audio_format: str = "wav"              # "wav" | "mp3" | "flac"
+    sample_rate: int = 44100
+    max_segment_duration_sec: float = 240.0  # ACE-Step supports up to 10-min songs
+    language: str = "en"                   # primary lyrics/prompt language
+
+
+class AceStepSegment(BaseModel):
+    """One parsed music segment derived from a scenario block."""
+
+    segment_id: str
+    segment_index: int
+    scene_ref: str = ""          # optional reference to paired video scene_id
+    start_sec: float = 0.0
+    end_sec: float = 0.0
+    duration_sec: float = 0.0
+    music_prompt: str            # core text description of the music
+    style_tags: List[str] = Field(default_factory=list)   # genre / mood tags
+    lyrics: str = ""             # optional vocals/lyrics text
+    source_audio: str = ""       # path/URL for style-transfer or cover source
+
+
+class AceStepJob(BaseModel):
+    """ACE-Step-ready job descriptor for a single music segment."""
+
+    job_id: str
+    segment_id: str
+    segment_index: int
+    job_type: str = "ace_step_music"  # "ace_step_music" | "ace_step_cover" | "ace_step_vocals"
+    duration_sec: float
+    music_prompt: str
+    style_tags: List[str] = Field(default_factory=list)
+    lyrics: str = ""
+    source_audio: str = ""
+    model_config_ace: Dict[str, Any] = Field(default_factory=dict)
+    status: str = "queued"
+
+
+class AceStepMusicRequest(BaseModel):
+    """Input for the ACE-Step scenario-to-jobs pipeline."""
+
+    project_id: str
+    scenario_text: str
+    config: AceStepGenerationConfig = Field(default_factory=AceStepGenerationConfig)
+
+
+class AceStepMusicResponse(BaseModel):
+    """Full pipeline output: parsed segments + ACE-Step job queue."""
+
+    project_id: str
+    total_segments: int
+    music_jobs: List[AceStepJob] = Field(default_factory=list)
+    queue_ready: bool = True
+    estimated_vram_gb: float = 0.0
+    warnings: List[str] = Field(default_factory=list)
