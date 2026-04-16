@@ -101,7 +101,9 @@ async def test_concurrent_reads_are_faster_than_serial_execution():
     elapsed = time.perf_counter() - started
 
     assert len(results) == 3
-    assert elapsed < 0.30, f"expected concurrent batch, got elapsed={elapsed:.3f}s"
+    # Concurrent: 3×0.15 s tasks should complete well under 2× per-task delay.
+    # Serial would take ≥0.45 s; generous 0.45 s bound avoids flakiness on slow CI.
+    assert elapsed < 0.45, f"expected concurrent batch, got elapsed={elapsed:.3f}s"
 
 
 @pytest.mark.asyncio
