@@ -14,3 +14,10 @@ pydantic>=2.10.0
 python-dotenv>=1.0.0
 croniter>=1.4.0
 pytest-asyncio>=0.23.0
+# MongoDB — persistent semantic memory, Robo QC storage, LangGraph checkpointer
+# Install only when MONGODB_URI is set; all three are optional at runtime.
+pymongo>=4.7.0
+motor>=3.4.0
+langgraph-checkpoint-mongodb>=2.0.0
+# Test dependency — mocks MongoDB server in-process (no real server needed)
+mongomock>=4.1.0

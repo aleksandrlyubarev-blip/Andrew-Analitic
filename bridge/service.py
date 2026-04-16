@@ -16,12 +16,22 @@ import asyncio
 import logging
 import os
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from bridge.client import MoltisClient, MoltisConfig
 from bridge.hitl import HitlGate
 
 logger = logging.getLogger("bridge_service")
+
+
+def _get_embedding(text: str) -> Optional[List[float]]:
+    """Embed text via litellm (text-embedding-3-small). Returns None on failure."""
+    try:
+        from litellm import embedding as _emb
+        return _emb(model="text-embedding-3-small", input=[text]).data[0]["embedding"]
+    except Exception as exc:
+        logger.debug(f"_get_embedding failed: {exc}")
+        return None
 
 
 class AndrewMoltisBridge:
@@ -90,30 +100,53 @@ class AndrewMoltisBridge:
             Structured result dict with narrative, confidence, cost, warnings
         """
         context = context or {}
+        session_id: Optional[str] = context.get("session_id") or context.get("user_id")
         start_time = time.time()
         logger.info(f"Bridge received: {query[:80]}...")
 
-        # 1. Recall relevant past analyses from Moltis memory
+        # 1. Recall relevant past analyses
+        #    Primary: MongoDB semantic search (when MONGODB_URI is set)
+        #    Fallback: Moltis GraphQL recall
         memory_context = ""
         if self.store_results:
             try:
-                memories = await self.moltis.recall_memory(query, limit=3)
-                if memories:
-                    memory_context = "\n".join(
-                        f"- Prior analysis (relevance {m.get('score', 0):.2f}): {m.get('content', '')[:200]}"
-                        for m in memories
-                    )
-                    logger.info(f"Found {len(memories)} relevant memories")
-            except Exception as e:
-                logger.warning(f"Memory recall failed (non-fatal): {e}")
+                from core.memory import _semantic_store
+                query_emb = await asyncio.to_thread(_get_embedding, query)
+                if query_emb is not None:
+                    memories = _semantic_store.search(query_emb, top_k=3, threshold=0.65)
+                    if memories:
+                        memory_context = "\n".join(
+                            f"- Prior analysis: {m.content[:200]}"
+                            for m in memories
+                        )
+                        logger.info(f"MongoDB recall: {len(memories)} memories found")
+            except Exception as exc:
+                logger.debug(f"MongoDB recall skipped: {exc}")
+
+            if not memory_context:
+                # Fallback to Moltis GraphQL
+                try:
+                    moltis_memories = await self.moltis.recall_memory(query, limit=3)
+                    if moltis_memories:
+                        memory_context = "\n".join(
+                            f"- Prior analysis (relevance {m.get('score', 0):.2f}): {m.get('content', '')[:200]}"
+                            for m in moltis_memories
+                        )
+                        logger.info(f"Moltis recall: {len(moltis_memories)} memories found")
+                except Exception as e:
+                    logger.warning(f"Memory recall failed (non-fatal): {e}")
 
         # 2. Run the agent pipeline (synchronous — offload to thread pool)
+        #    Pass session_id as thread_id so the MongoDB checkpointer can
+        #    persist and resume LangGraph state across turns.
         executor = self._get_executor()
         enriched_query = query
         if memory_context:
             enriched_query = f"{query}\n\n[Context from prior analyses:\n{memory_context}]"
 
-        result = await asyncio.to_thread(executor.execute, enriched_query)
+        result = await asyncio.to_thread(
+            executor.execute, enriched_query, session_id
+        )
         elapsed = time.time() - start_time
 
         # 3. Build structured response
@@ -159,21 +192,49 @@ class AndrewMoltisBridge:
         # 5. Format for Moltis channel delivery
         response["formatted_message"] = self._format_for_channel(response)
 
-        # 6. Store in Moltis memory for future context
+        # 6. Store result for future memory recall
+        #    Primary: MongoDB via ConsolidationEngine (dedup + embedding)
+        #    Fallback: Moltis GraphQL store_memory
         if self.store_results and result.success:
+            episodic = [
+                {"role": "user", "content": query},
+                {"role": "assistant", "content": response["narrative"][:500]},
+            ]
+            stored_in_mongo = False
             try:
-                await self.moltis.store_memory(
-                    content=f"Query: {query}\nResult: {response['narrative'][:500]}",
-                    metadata={
+                from core.memory import _consolidation_engine
+                record_id = await asyncio.to_thread(
+                    _consolidation_engine.consolidate_session,
+                    session_id or "anon",
+                    episodic,
+                    {
                         "confidence": response["confidence"],
                         "sql": result.sql_query,
-                        "timestamp": time.time(),
                         "cost": response["cost_usd"],
+                        "channel": context.get("channel", "api"),
                     },
                 )
-                logger.info("Analysis stored in Moltis memory")
-            except Exception as e:
-                logger.warning(f"Memory store failed (non-fatal): {e}")
+                if record_id:
+                    stored_in_mongo = True
+                    logger.info(f"Analysis stored in MongoDB memory ({record_id})")
+            except Exception as exc:
+                logger.debug(f"MongoDB memory store skipped: {exc}")
+
+            if not stored_in_mongo:
+                # Fallback to Moltis GraphQL
+                try:
+                    await self.moltis.store_memory(
+                        content=f"Query: {query}\nResult: {response['narrative'][:500]}",
+                        metadata={
+                            "confidence": response["confidence"],
+                            "sql": result.sql_query,
+                            "timestamp": time.time(),
+                            "cost": response["cost_usd"],
+                        },
+                    )
+                    logger.info("Analysis stored in Moltis memory")
+                except Exception as e:
+                    logger.warning(f"Memory store failed (non-fatal): {e}")
 
         logger.info(
             f"Bridge completed: confidence={response['confidence']:.2f}, "

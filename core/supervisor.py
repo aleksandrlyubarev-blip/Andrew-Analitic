@@ -333,6 +333,33 @@ def _after_andrew(state: SupervisorState) -> str:
 _supervisor_graph = None
 
 
+def _get_checkpointer():
+    """
+    Return a MongoDB checkpointer when MONGODB_URI is set, else None.
+
+    A checkpointer gives LangGraph persistent conversation state across
+    restarts.  Each thread_id maps to a saved graph snapshot in MongoDB
+    (collection: langgraph_checkpoints).
+
+    Requires: langgraph-checkpoint-mongodb (pip install langgraph-checkpoint-mongodb)
+    """
+    uri = os.getenv("MONGODB_URI", "")
+    if not uri:
+        return None
+    try:
+        from langgraph.checkpoint.mongodb import MongoDBSaver
+        db_name = os.getenv("MONGODB_DB", "romeoflexvision")
+        checkpointer = MongoDBSaver.from_conn_string(uri, db_name=db_name)
+        logger.info("LangGraph supervisor: MongoDB checkpointer active")
+        return checkpointer
+    except Exception as exc:
+        logger.warning(
+            f"MongoDB checkpointer init failed ({exc}); "
+            "running stateless (no session persistence)"
+        )
+        return None
+
+
 def _get_graph():
     """Compile the LangGraph supervisor on first call."""
     global _supervisor_graph
@@ -364,7 +391,8 @@ def _get_graph():
     workflow.add_edge("run_romeo", "fuse_results")
     workflow.add_edge("fuse_results", END)
 
-    _supervisor_graph = workflow.compile()
+    checkpointer = _get_checkpointer()
+    _supervisor_graph = workflow.compile(checkpointer=checkpointer)
     return _supervisor_graph
 
 
@@ -432,16 +460,33 @@ class SwarmSupervisor:
             metadata=metadata,
         )
 
-    def execute(self, goal: str) -> SupervisorResult:
-        logger.info(f"SwarmSupervisor v1.0.0 | {goal[:80]}")
-        state = _get_graph().invoke({
-            "query": goal,
-            "db_url": self.db_url,
-            "schema_context": self.schema,
-            "cost_usd": 0.0,
-            "warnings": [],
-            "error_message": "",
-        })
+    def execute(self, goal: str, thread_id: Optional[str] = None) -> SupervisorResult:
+        """
+        Run the supervisor graph for a single query.
+
+        thread_id — when provided (and MONGODB_URI is set), LangGraph saves the
+        graph state to MongoDB after each node and can resume the conversation on
+        the next call with the same thread_id.  Pass the session/user ID from
+        the caller for persistent multi-turn memory.
+
+        Without a thread_id (or without MONGODB_URI) the graph runs stateless.
+        """
+        logger.info(f"SwarmSupervisor v1.0.0 | thread={thread_id or 'stateless'} | {goal[:80]}")
+        invoke_kwargs: Dict[str, Any] = {}
+        if thread_id:
+            invoke_kwargs["config"] = {"configurable": {"thread_id": thread_id}}
+
+        state = _get_graph().invoke(
+            {
+                "query": goal,
+                "db_url": self.db_url,
+                "schema_context": self.schema,
+                "cost_usd": 0.0,
+                "warnings": [],
+                "error_message": "",
+            },
+            **invoke_kwargs,
+        )
         return SupervisorResult(state)
 
     def invalidate_schema(self):
