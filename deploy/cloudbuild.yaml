@@ -1,0 +1,78 @@
+# deploy/cloudbuild.yaml
+#
+# Cloud Build trigger config for the Andrew beta.
+# Wire up via: Console -> Cloud Build -> Triggers -> Connect repository.
+# Trigger on push to: claude/deploy-andrew-gcp-beta-f5UVU (or main, post-merge).
+#
+# Substitutions (override in the trigger UI if needed):
+#   _REGION            us-central1
+#   _REPO              andrew                 (Artifact Registry repo)
+#   _SERVICE           andrew-core            (Cloud Run service name)
+#   _SQL_INSTANCE      andrew-pg              (Cloud SQL instance name)
+#   _RUNTIME_SA        andrew-core-sa@${PROJECT_ID}.iam.gserviceaccount.com
+#
+# Each push deploys to a tagged revision with --no-traffic. Promote with:
+#   gcloud run services update-traffic $_SERVICE --to-latest --region=$_REGION
+
+substitutions:
+  _REGION: us-central1
+  _REPO: andrew
+  _SERVICE: andrew-core
+  _SQL_INSTANCE: andrew-pg
+  _RUNTIME_SA: andrew-core-sa@${PROJECT_ID}.iam.gserviceaccount.com
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/andrew-core:${SHORT_SHA}
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/andrew-core:latest
+      - -f
+      - deploy/Dockerfile.cloudrun
+      - .
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - --all-tags
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/andrew-core
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/andrew-core:${SHORT_SHA}
+      - --region=${_REGION}
+      - --platform=managed
+      - --execution-environment=gen2
+      - --service-account=${_RUNTIME_SA}
+      - --cpu=1
+      - --memory=1Gi
+      - --cpu-boost
+      - --min-instances=0
+      - --max-instances=3
+      - --concurrency=4
+      - --timeout=3600
+      - --add-cloudsql-instances=${PROJECT_ID}:${_REGION}:${_SQL_INSTANCE}
+      - --set-env-vars=DB_USER=andrew,DB_NAME=andrew,DB_HOST=/cloudsql/${PROJECT_ID}:${_REGION}:${_SQL_INSTANCE},LITELLM_LOG=INFO,DATABASE_URL=postgresql+psycopg://andrew@/andrew?host=/cloudsql/${PROJECT_ID}:${_REGION}:${_SQL_INSTANCE}
+      - --set-secrets=OPENAI_API_KEY=OPENAI_API_KEY:latest,ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest,XAI_API_KEY=XAI_API_KEY:latest,E2B_API_KEY=E2B_API_KEY:latest,DB_PASSWORD=DB_PASSWORD:latest,MOLTIS_PASSWORD=MOLTIS_PASSWORD:latest,BETA_API_KEYS=BETA_API_KEYS:latest
+      - --allow-unauthenticated
+      - --tag=rev-${SHORT_SHA}
+      - --no-traffic
+
+images:
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/andrew-core:${SHORT_SHA}
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/andrew-core:latest
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8
+
+timeout: 1200s
