@@ -24,7 +24,9 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from bridge.ace_step import AceStepMusicPipeline
+from bridge.auth import BetaApiKeyMiddleware, middleware_kwargs_from_env
 from bridge.client import MoltisConfig
+from bridge.logging_setup import configure_logging
 from bridge.scene_ops import build_demo_scene_ops_request
 from bridge.schemas import (
     AceStepMusicRequest,
@@ -40,6 +42,9 @@ from bridge.schemas import (
 )
 from bridge.service import AndrewMoltisBridge
 
+# Configure root logger before any module-level logger.info calls. Honours
+# LOG_FORMAT=json (set by Cloud Run) and LOG_LEVEL.
+configure_logging()
 logger = logging.getLogger("bridge_api")
 
 # ── Rate limiter ─────────────────────────────────────────────
@@ -93,6 +98,19 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
+
+# Per-tester X-Api-Key auth for the GCP beta. No-op when BETA_API_KEYS is
+# unset and BETA_AUTH_REQUIRED isn't "true" — keeps local dev / CI free of
+# auth ceremony, while production deploys (which always set BETA_API_KEYS
+# via Secret Manager) get gated.
+_auth_kwargs = middleware_kwargs_from_env()
+if _auth_kwargs is not None:
+    app.add_middleware(BetaApiKeyMiddleware, **_auth_kwargs)
+    logger.info(
+        "BetaApiKeyMiddleware enabled (keys=%d, fail_closed=%s)",
+        len(_auth_kwargs["keys"]),
+        _auth_kwargs["fail_closed"],
+    )
 
 
 # ── Endpoints ────────────────────────────────────────────────
