@@ -139,6 +139,10 @@ PGPASSWORD=$(gcloud secrets versions access latest --secret=DB_PASSWORD) \
   psql "host=127.0.0.1 port=5433 user=andrew dbname=andrew"
 ```
 
+The `andrew.request_log` table is populated by `bridge/request_log.py`'s
+`RequestLogMiddleware`, which writes one row per non-probe request. It's
+fail-open: a Cloud SQL outage drops log rows but never blocks `/analyze`.
+
 Common queries:
 
 ```sql
@@ -154,6 +158,12 @@ SELECT route, status_code, COUNT(*)
 FROM andrew.request_log
 WHERE ts > now() - interval '1 hour' AND status_code >= 500
 GROUP BY 1,2 ORDER BY 3 DESC;
+
+-- Auth-failure pattern (potential abuse / leaked key)
+SELECT date_trunc('hour', ts) AS hr, COUNT(*) AS attempts
+FROM andrew.request_log
+WHERE status_code IN (401, 403) AND ts > now() - interval '24 hours'
+GROUP BY 1 ORDER BY 1 DESC;
 
 -- Memory usage check (pgvector index health)
 SELECT pg_size_pretty(pg_total_relation_size('andrew.memory_chunks'));

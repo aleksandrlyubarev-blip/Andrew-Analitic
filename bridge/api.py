@@ -27,6 +27,10 @@ from bridge.ace_step import AceStepMusicPipeline
 from bridge.auth import BetaApiKeyMiddleware, middleware_kwargs_from_env
 from bridge.client import MoltisConfig
 from bridge.logging_setup import configure_logging
+from bridge.request_log import (
+    RequestLogMiddleware,
+    middleware_kwargs_from_env as request_log_kwargs_from_env,
+)
 from bridge.scene_ops import build_demo_scene_ops_request
 from bridge.schemas import (
     AceStepMusicRequest,
@@ -112,6 +116,17 @@ if _auth_kwargs is not None:
         _auth_kwargs["fail_closed"],
     )
 
+# Cost / usage attribution for the beta — writes one row per request to
+# andrew.request_log so the queries in BETA_RUNBOOK §7 return data. No-op
+# unless DATABASE_URL is Postgres. Starlette wraps later add_middleware calls
+# OUTSIDE earlier ones, so this sits outermost — it always logs, even when
+# auth rejects with 401/403 (the row gets user_slug="anonymous" in that case,
+# which is what we want for abuse-pattern detection).
+_log_kwargs = request_log_kwargs_from_env()
+if _log_kwargs is not None:
+    app.add_middleware(RequestLogMiddleware, **_log_kwargs)
+    logger.info("RequestLogMiddleware enabled (writes andrew.request_log)")
+
 
 # ── Endpoints ────────────────────────────────────────────────
 
@@ -137,6 +152,13 @@ async def analyze(request: Request, req: AnalyzeRequest):
         req.query,
         context={"channel": req.channel, "user_id": req.user_id, "session_id": req.session_id},
     )
+    # Surface cost/routing onto request.state so RequestLogMiddleware can
+    # persist them. Done here (not in the bridge) so non-HTTP callers of
+    # AndrewMoltisBridge don't take a Starlette dependency.
+    if (cost := result.get("cost_usd")) is not None:
+        request.state.cost_usd = cost
+    if (routing := result.get("routing")) is not None:
+        request.state.model = routing
     return AnalyzeResponse(**{k: v for k, v in result.items() if k in AnalyzeResponse.model_fields})
 
 
