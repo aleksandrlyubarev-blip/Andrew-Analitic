@@ -26,6 +26,7 @@ from slowapi.util import get_remote_address
 from bridge.ace_step import AceStepMusicPipeline
 from bridge.auth import BetaApiKeyMiddleware, middleware_kwargs_from_env
 from bridge.client import MoltisConfig
+from bridge.llm_telemetry import install as install_llm_telemetry
 from bridge.logging_setup import configure_logging
 from bridge.request_log import (
     RequestLogMiddleware,
@@ -50,6 +51,11 @@ from bridge.service import AndrewMoltisBridge
 # LOG_FORMAT=json (set by Cloud Run) and LOG_LEVEL.
 configure_logging()
 logger = logging.getLogger("bridge_api")
+
+# Per-LLM-call telemetry: registers a litellm success/failure callback that
+# emits one structured log row per completion. No-op if litellm isn't on
+# the path (e.g. during isolated bridge tests).
+install_llm_telemetry()
 
 # ── Rate limiter ─────────────────────────────────────────────
 
@@ -152,13 +158,15 @@ async def analyze(request: Request, req: AnalyzeRequest):
         req.query,
         context={"channel": req.channel, "user_id": req.user_id, "session_id": req.session_id},
     )
-    # Surface cost/routing onto request.state so RequestLogMiddleware can
+    # Surface cost/model onto request.state so RequestLogMiddleware can
     # persist them. Done here (not in the bridge) so non-HTTP callers of
     # AndrewMoltisBridge don't take a Starlette dependency.
+    # `routing` is the LANE (andrew/romeo/hybrid); `model_used` is the actual
+    # LLM id (e.g. "gpt-4o-mini"). The request_log column expects the latter.
     if (cost := result.get("cost_usd")) is not None:
         request.state.cost_usd = cost
-    if (routing := result.get("routing")) is not None:
-        request.state.model = routing
+    if (model_used := result.get("model_used")) and model_used != "unknown":
+        request.state.model = model_used
     return AnalyzeResponse(**{k: v for k, v in result.items() if k in AnalyzeResponse.model_fields})
 
 

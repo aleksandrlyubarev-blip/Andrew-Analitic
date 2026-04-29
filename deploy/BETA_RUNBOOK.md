@@ -44,6 +44,25 @@ gcloud logging tail "resource.type=cloud_run_revision AND \
   jsonPayload.user_slug=alex"
 ```
 
+Per-LLM-call cost (one row per `litellm.completion` invocation, emitted by
+`bridge/llm_telemetry.py`):
+```bash
+gcloud logging read 'resource.type=cloud_run_revision AND
+  resource.labels.service_name='$SERVICE' AND
+  jsonPayload.event="llm_call"' \
+  --limit=200 --format='value(timestamp,jsonPayload.model,jsonPayload.cost_usd,jsonPayload.tokens_in,jsonPayload.tokens_out,jsonPayload.latency_ms)'
+```
+
+Top expensive calls in the last hour:
+```bash
+gcloud logging read 'resource.type=cloud_run_revision AND
+  resource.labels.service_name='$SERVICE' AND
+  jsonPayload.event="llm_call" AND
+  jsonPayload.cost_usd > 0.05 AND
+  timestamp >= "'$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ)'"' \
+  --limit=50
+```
+
 ---
 
 ## 3. Roll back a bad deploy
