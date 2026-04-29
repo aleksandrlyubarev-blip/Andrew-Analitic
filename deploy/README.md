@@ -14,6 +14,7 @@ README maps that plan to the files in this directory.
 | `provision.sh` | Day 4-5: Artifact Registry + Cloud SQL Postgres 16 (`db-f1-micro` Enterprise) + Secret Manager seeding + per-tester beta keys + apply schema migration. | §3 Day 4-5 |
 | `deploy.sh` | Day 6: `gcloud builds submit` + `gcloud run deploy`. Reads tag/min-instances/max-instances from env. | §3 Day 6, §9 |
 | `pause.sh` / `resume.sh` | Emergency stop & restart. Sets Cloud Run `max-instances=0` and Cloud SQL `activation-policy=NEVER`. | §4 cost-protection |
+| `smoketest.sh` | Day-13 smoke test: hits `/health`, the auth gate, and 20 `/analyze` queries balanced across analytics / education / hybrid lanes; reports pass/fail/lane-mismatch summary. | §3 Day 13 |
 | `migrations/001_init.sql` | Postgres schema: `pgvector` + `pg_trgm`, LangGraph checkpoint tables, `memory_chunks` (vector + tsvector + trigram indexes), `request_log`, sales fixture. | §3 Day 5, §3 Day 8 |
 | `moltis-gce/` | Optional GCE VM startup script + README for running Moltis with `docker.sock`. **Skip unless E2B fallback is insufficient.** | §5.5 option (c) |
 | `BETA_RUNBOOK.md` | Operational playbook: rollback, key rotation, log tailing, DB surgery, teardown. | §3 Day 14 |
@@ -45,11 +46,36 @@ export BETA_USERS="alex sergei novik kuk"
 ./deploy/deploy.sh
 ```
 
-After step 5 you'll get a public Cloud Run URL. The FastAPI app at
-`bridge/api.py` should validate the `X-Api-Key` header against the
-`BETA_API_KEYS` secret (a JSON object `{user_slug: key}`). If that middleware
-isn't wired up yet, the bridge will accept any caller until you add it — track
-this as the one piece of application-side work the Cloud Run deploy depends on.
+After step 5 you'll get a public Cloud Run URL. `bridge/api.py` already wires
+in `BetaApiKeyMiddleware` (see `bridge/auth.py`), which validates the
+`X-Api-Key` header against the `BETA_API_KEYS` secret (a JSON object
+`{user_slug: key}`). The `Dockerfile.cloudrun` sets `BETA_AUTH_REQUIRED=true`
+so the gate is fail-closed even if the secret happens to be unset.
+
+To smoke-test once deployed:
+
+```bash
+URL=$(gcloud run services describe andrew-core --region=us-central1 \
+       --format='value(status.url)')
+KEY=$(gcloud secrets versions access latest --secret=BETA_API_KEYS | jq -r .alex)
+URL="$URL" API_KEY="$KEY" ./deploy/smoketest.sh
+```
+
+## LangGraph state persistence (optional)
+
+`core/checkpointing.get_checkpointer()` returns a saver based on
+`LANGGRAPH_CHECKPOINTER` (or by inspecting `DATABASE_URL`):
+
+- `memory` (default) — `InMemorySaver`, ephemeral within a process
+- `postgres` — `PostgresSaver` against the Cloud SQL instance; tables created
+  by `migrations/001_init.sql`
+- `none` — graph compiled without a checkpointer (current existing graphs)
+
+Persistence is **not** wired into the existing graphs yet; the factory is
+infrastructure for whichever node decides to enable multi-turn threads. To
+enable, change a graph's `workflow.compile()` to
+`workflow.compile(checkpointer=get_checkpointer())` and pass
+`config={"configurable": {"thread_id": session_id}}` on `.invoke()`.
 
 ## What the deploy does NOT do (yet)
 
