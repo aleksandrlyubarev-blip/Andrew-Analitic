@@ -16,11 +16,8 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
-import os
 import sys
 import types
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
 

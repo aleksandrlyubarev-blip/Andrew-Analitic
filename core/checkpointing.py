@@ -16,12 +16,17 @@ conversation state across requests you must use the Postgres backend.
 
 Usage:
     from core.checkpointing import get_checkpointer
-    graph = workflow.compile(checkpointer=get_checkpointer())
+    saver = get_checkpointer()
+    if saver and not getattr(saver, "_setup_done", False):
+        saver.setup()                       # creates tables in `public` schema
+    graph = workflow.compile(checkpointer=saver)
     graph.invoke(state, config={"configurable": {"thread_id": session_id}})
 
-The Postgres tables (``andrew.checkpoints`` + ``andrew.checkpoint_writes``)
-are created by ``deploy/migrations/001_init.sql`` so we don't depend on
-``checkpointer.setup()`` running at startup.
+PostgresSaver creates its tables in the default search_path (typically
+``public``) on first ``setup()`` call. We don't pre-create them in
+``deploy/migrations/001_init.sql`` because the layout can drift between
+versions of ``langgraph-checkpoint-postgres`` and a mismatched pre-creation
+would silently corrupt inserts.
 """
 
 from __future__ import annotations

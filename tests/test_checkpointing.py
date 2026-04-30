@@ -18,11 +18,8 @@ Run: python -m pytest tests/test_checkpointing.py -v
 
 from __future__ import annotations
 
-import os
 import sys
 from unittest.mock import patch
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
 

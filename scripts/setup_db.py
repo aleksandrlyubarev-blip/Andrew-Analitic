@@ -134,13 +134,14 @@ def _setup_postgres(url: str) -> None:
 
     with psycopg.connect(libpq_url, autocommit=True) as conn:
         with conn.cursor() as cur:
-            cur.execute("CREATE SCHEMA IF NOT EXISTS andrew")
-            # Match deploy/migrations/001_init.sql column types so the fixture
-            # works whether or not the migration has run.
-            cur.execute("DROP TABLE IF EXISTS andrew.sales")
+            # `sales` lives in `public` because andrew_swarm.discover_schema
+            # filters on table_schema='public'. Putting it in `andrew` would
+            # break LLM-generated SQL (the relation lookup falls back to the
+            # hardcoded schema dict but the actual table is unreachable).
+            cur.execute("DROP TABLE IF EXISTS public.sales")
             cur.execute(
                 """
-                CREATE TABLE andrew.sales (
+                CREATE TABLE public.sales (
                     id       BIGINT PRIMARY KEY,
                     product  TEXT      NOT NULL,
                     revenue  DOUBLE PRECISION NOT NULL,
@@ -151,13 +152,13 @@ def _setup_postgres(url: str) -> None:
                 """
             )
             cur.executemany(
-                "INSERT INTO andrew.sales (id, product, revenue, quantity, date, region) "
+                "INSERT INTO public.sales (id, product, revenue, quantity, date, region) "
                 "VALUES (%s, %s, %s, %s, %s, %s)",
                 ROWS,
             )
 
     print(f"Postgres database seeded: {_redact(libpq_url)}")
-    print(f"  schema=andrew, table=sales, {len(ROWS)} rows")
+    print(f"  schema=public, table=sales, {len(ROWS)} rows")
     print()
     print("Already pointed at this DB? You're done.")
 

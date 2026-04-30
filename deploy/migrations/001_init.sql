@@ -16,8 +16,11 @@ CREATE SCHEMA IF NOT EXISTS andrew;
 CREATE SCHEMA IF NOT EXISTS moltis;
 
 -- ── Sales fixture (mirrors scripts/setup_db.py) ────────────
--- Lets the existing demo flows work against Postgres without code changes.
-CREATE TABLE IF NOT EXISTS andrew.sales (
+-- Lives in `public`, NOT `andrew`, because core/andrew_swarm.py's
+-- discover_schema() filters on `table_schema='public'`. Putting it in
+-- `andrew` would silently fall back to the hardcoded schema and then fail
+-- at SQL execution time with "relation 'sales' does not exist".
+CREATE TABLE IF NOT EXISTS public.sales (
     id       BIGINT PRIMARY KEY,
     product  TEXT      NOT NULL,
     revenue  DOUBLE PRECISION NOT NULL,
@@ -26,7 +29,7 @@ CREATE TABLE IF NOT EXISTS andrew.sales (
     region   TEXT      NOT NULL
 );
 
-INSERT INTO andrew.sales VALUES
+INSERT INTO public.sales VALUES
     (1,  'Widget A', 15000.0, 120, '2025-01-15', 'North'),
     (2,  'Widget B', 23000.0, 200, '2025-01-20', 'South'),
     (3,  'Widget A', 18000.0, 150, '2025-02-10', 'East'),
@@ -39,33 +42,16 @@ INSERT INTO andrew.sales VALUES
     (10, 'Widget C', 29000.0, 250, '2025-06-01', 'South')
 ON CONFLICT (id) DO NOTHING;
 
--- ── LangGraph checkpoints (durable graph state) ────────────
--- Schema follows langgraph.checkpoint.postgres.PostgresSaver layout.
--- Tables are created on first checkpointer.setup() call at runtime, but we
--- declare them here so the migration is the single source of truth.
-CREATE TABLE IF NOT EXISTS andrew.checkpoints (
-    thread_id     TEXT NOT NULL,
-    checkpoint_ns TEXT NOT NULL DEFAULT '',
-    checkpoint_id TEXT NOT NULL,
-    parent_checkpoint_id TEXT,
-    type          TEXT,
-    checkpoint    JSONB NOT NULL,
-    metadata      JSONB NOT NULL DEFAULT '{}'::jsonb,
-    PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
-);
-
-CREATE TABLE IF NOT EXISTS andrew.checkpoint_writes (
-    thread_id     TEXT NOT NULL,
-    checkpoint_ns TEXT NOT NULL DEFAULT '',
-    checkpoint_id TEXT NOT NULL,
-    task_id       TEXT NOT NULL,
-    idx           INTEGER NOT NULL,
-    channel       TEXT NOT NULL,
-    type          TEXT,
-    blob          BYTEA,
-    task_path     TEXT NOT NULL DEFAULT '',
-    PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
-);
+-- ── LangGraph checkpoints ──────────────────────────────────
+-- Intentionally NOT pre-created. langgraph.checkpoint.postgres.PostgresSaver
+-- creates its own tables (in `public`, the default search_path) the first
+-- time `setup()` is called. Pre-creating them in a different schema or with
+-- a slightly-off layout would silently break inserts when the version of
+-- langgraph-checkpoint-postgres bumps. To enable persistent threads:
+--   1. Set LANGGRAPH_CHECKPOINTER=postgres (or use a postgresql:// DATABASE_URL)
+--   2. Run: python -c "from core.checkpointing import get_checkpointer; \
+--                       s=get_checkpointer(); s.setup() if s else None"
+-- See core/checkpointing.py for the factory.
 
 -- ── Hybrid memory (vector + full-text) for both Andrew and Moltis ──
 -- Default embedding dim 1536 = OpenAI text-embedding-3-small.

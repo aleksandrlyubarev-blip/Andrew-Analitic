@@ -12,11 +12,6 @@ Run: python -m pytest tests/test_auth.py -v
 
 from __future__ import annotations
 
-import os
-import sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
 import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient

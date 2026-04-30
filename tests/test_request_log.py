@@ -17,13 +17,10 @@ Run: python -m pytest tests/test_request_log.py -v
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 import types
 from typing import Any
 from unittest.mock import patch
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
 from fastapi import FastAPI, Request
