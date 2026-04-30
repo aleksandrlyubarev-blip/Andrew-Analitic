@@ -136,9 +136,25 @@ if _log_kwargs is not None:
 
 # ── Endpoints ────────────────────────────────────────────────
 
+@app.get("/healthz", include_in_schema=False)
+async def healthz():
+    """Cheap liveness/startup probe — no bridge init, no outbound calls.
+
+    Cloud Run probes hit this every 5-30 s; touching the bridge singleton
+    here would either (a) trigger heavy lazy init on every cold start before
+    the first real request, or (b) fail the probe whenever Moltis is
+    unreachable (it always is on Cloud Run). Keep it strictly process-alive.
+    """
+    return {"status": "ok"}
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health():
-    """Health check for Andrew, the Moltis runtime, and the bridge itself."""
+    """Rich health check for humans: includes Moltis reachability.
+
+    NOT used by Cloud Run probes — see /healthz for that. Curl this when
+    debugging end-to-end connectivity.
+    """
     bridge = get_bridge()
     moltis_health = await bridge.moltis.health_check()
     return HealthResponse(andrew="ok", moltis=moltis_health, bridge="ok")

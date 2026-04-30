@@ -60,6 +60,10 @@ steps:
       - --max-instances=3
       - --concurrency=4
       - --timeout=3600
+      # Probes hit /healthz (cheap; no bridge init, no Moltis call). Budget:
+      # startup 5s×10 = 50s tolerance; liveness 30s×3 = ~90s unhealthy → restart.
+      - --startup-probe=httpGet.path=/healthz,initialDelaySeconds=0,periodSeconds=5,timeoutSeconds=4,failureThreshold=10
+      - --liveness-probe=httpGet.path=/healthz,periodSeconds=30,timeoutSeconds=4,failureThreshold=3
       - --add-cloudsql-instances=${PROJECT_ID}:${_REGION}:${_SQL_INSTANCE}
       - --set-env-vars=DB_USER=andrew,DB_NAME=andrew,DB_HOST=/cloudsql/${PROJECT_ID}:${_REGION}:${_SQL_INSTANCE},LITELLM_LOG=INFO,DATABASE_URL=postgresql+psycopg://andrew@/andrew?host=/cloudsql/${PROJECT_ID}:${_REGION}:${_SQL_INSTANCE}
       - --set-secrets=OPENAI_API_KEY=OPENAI_API_KEY:latest,ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest,XAI_API_KEY=XAI_API_KEY:latest,E2B_API_KEY=E2B_API_KEY:latest,DB_PASSWORD=DB_PASSWORD:latest,MOLTIS_PASSWORD=MOLTIS_PASSWORD:latest,BETA_API_KEYS=BETA_API_KEYS:latest

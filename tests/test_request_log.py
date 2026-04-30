@@ -224,9 +224,15 @@ async def test_postgres_url_inserts_row(fake_psycopg):
 @pytest.mark.asyncio
 async def test_skip_paths_not_logged(fake_psycopg):
     app = _build_app(db_url="postgresql://u:p@h/db")
+    # Add a /healthz route so we can verify the probe path is also skipped.
+    @app.get("/healthz")
+    async def _hz():
+        return {"status": "ok"}
     client = TestClient(app)
 
     response = await _run_and_drain(client, "GET", "/health")
+    assert response.status_code == 200
+    response = await _run_and_drain(client, "GET", "/healthz")
     assert response.status_code == 200
     assert fake_psycopg.log == []
 
@@ -287,3 +293,7 @@ async def test_anonymous_when_user_slug_unset(fake_psycopg):
 def test_skip_paths_includes_health():
     assert "/health" in SKIP_PATHS
     assert "/openapi.json" in SKIP_PATHS
+    assert "/healthz" in SKIP_PATHS, (
+        "/healthz fires every 5-30s from the Cloud Run probe; logging it "
+        "would dominate the request_log table"
+    )

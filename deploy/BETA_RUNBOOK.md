@@ -16,16 +16,46 @@ gcloud config set project $PROJECT_ID
 
 ## 1. Health checks
 
+Two endpoints serve different purposes:
+
+| Endpoint | Use | Cost | Calls Moltis? |
+|---|---|---|---|
+| `/healthz` | Cloud Run startup + liveness probes | <1 ms | no |
+| `/health`  | Human "is the whole stack reachable" | depends on Moltis | yes |
+
 ```bash
 URL=$(gcloud run services describe $SERVICE --region=$REGION --format='value(status.url)')
-curl -sS "$URL/health" | jq .
+curl -sS "$URL/healthz" | jq .   # cheap process-alive check
+curl -sS "$URL/health"  | jq .   # rich check; calls Moltis (will fail in
+                                 # Cloud Run unless the GCE Moltis sidecar
+                                 # is wired up — that's expected)
 ```
 
-Expected: `{"status": "ok", ...}` within 2 s warm, ~6-10 s cold.
+Expected `/healthz`: `{"status": "ok"}` within 2 s warm, ~6-10 s cold.
 
 If unhealthy:
 ```bash
 gcloud run services logs read $SERVICE --region=$REGION --limit=200
+```
+
+### Probe failures (`STARTUP HTTP probe failed` / restart loop)
+
+Cloud Run logs `STARTUP HTTP probe failed` when the container can't serve
+`/healthz` within `failureThreshold × periodSeconds` (currently 50 s). Common
+causes:
+
+| Symptom in logs | Likely cause | Fix |
+|---|---|---|
+| `Cannot import bridge.api` | Missing dep or broken Dockerfile | Check `pip install` step in build logs |
+| `bind: address already in use` | App didn't read `$PORT` env | Verify `gunicorn ... --bind 0.0.0.0:$PORT` in Dockerfile CMD |
+| Probe times out at exactly 4 s | Sync work in `lifespan` startup | Move heavy init off the import path |
+| Liveness probe failing on warm instance | `/healthz` handler regressed | Confirm it returns immediately with no deps |
+
+To inspect the current probe config of a deployed revision:
+```bash
+gcloud run services describe $SERVICE --region=$REGION \
+  --format='yaml(spec.template.spec.containers[0].startupProbe,
+                 spec.template.spec.containers[0].livenessProbe)'
 ```
 
 ---

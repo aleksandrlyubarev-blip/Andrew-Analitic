@@ -69,13 +69,21 @@ QUERIES="${QUERIES:-$DEFAULT_QUERIES}"
 
 # ── Health probe ─────────────────────────────────────────────────────────────
 
-echo "▶ Health probe: $URL/health"
-HEALTH=$(curl -fsS --max-time 10 "$URL/health" || true)
-if [[ -z "$HEALTH" ]]; then
-    echo "  FAIL — service did not respond on /health within 10s"
+echo "▶ Probe endpoint: $URL/healthz (Cloud Run startup/liveness target)"
+HEALTHZ=$(curl -fsS --max-time 10 "$URL/healthz" || true)
+if [[ -z "$HEALTHZ" ]]; then
+    echo "  FAIL — service did not respond on /healthz within 10s"
     exit 1
 fi
-echo "  $HEALTH" | jq -c .
+echo "  $HEALTHZ" | jq -c .
+
+echo "▶ Rich health: $URL/health (includes Moltis reachability)"
+HEALTH=$(curl -fsS --max-time 10 "$URL/health" || true)
+if [[ -n "$HEALTH" ]]; then
+    echo "  $HEALTH" | jq -c .
+else
+    echo "  WARN — /health did not respond within 10s (Moltis may be unreachable; non-fatal)"
+fi
 echo
 
 # ── Auth gate probe (no key must 401) ────────────────────────────────────────

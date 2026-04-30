@@ -48,6 +48,7 @@ from starlette.types import ASGIApp
 logger = logging.getLogger("bridge.request_log")
 
 SKIP_PATHS: frozenset[str] = frozenset({
+    "/healthz",         # Cloud Run probe — fires every 5-30s, would flood the table
     "/health",
     "/openapi.json",
     "/docs",

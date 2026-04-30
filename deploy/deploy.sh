@@ -41,6 +41,13 @@ echo ">>> Deploying to Cloud Run: ${SERVICE} (${REGION})"
 AUTH_FLAG="--allow-unauthenticated"
 [[ "${ALLOW_UNAUTHENTICATED}" == "false" ]] && AUTH_FLAG="--no-allow-unauthenticated"
 
+# Health probes — point at /healthz (cheap, no bridge init, no Moltis call).
+# Startup probe budget: 5s × 10 retries = 50s of cold-start tolerance, well
+# above the 4-10s observed import time for langgraph + litellm + sqlglot.
+# Liveness probe: 30s period × 3 failures = ~90s of unhealthy before restart.
+STARTUP_PROBE='httpGet.path=/healthz,initialDelaySeconds=0,periodSeconds=5,timeoutSeconds=4,failureThreshold=10'
+LIVENESS_PROBE='httpGet.path=/healthz,periodSeconds=30,timeoutSeconds=4,failureThreshold=3'
+
 gcloud run deploy "${SERVICE}" \
   --image="${IMAGE}" \
   --region="${REGION}" \
@@ -54,6 +61,8 @@ gcloud run deploy "${SERVICE}" \
   --max-instances="${MAX_INSTANCES}" \
   --concurrency=4 \
   --timeout=3600 \
+  --startup-probe="${STARTUP_PROBE}" \
+  --liveness-probe="${LIVENESS_PROBE}" \
   --add-cloudsql-instances="${SQL_CONN}" \
   --set-env-vars="DB_USER=andrew,DB_NAME=andrew,DB_HOST=/cloudsql/${SQL_CONN},LITELLM_LOG=INFO,DATABASE_URL=postgresql+psycopg://andrew@/andrew?host=/cloudsql/${SQL_CONN}" \
   --set-secrets="OPENAI_API_KEY=OPENAI_API_KEY:latest,ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest,XAI_API_KEY=XAI_API_KEY:latest,E2B_API_KEY=E2B_API_KEY:latest,DB_PASSWORD=DB_PASSWORD:latest,MOLTIS_PASSWORD=MOLTIS_PASSWORD:latest,BETA_API_KEYS=BETA_API_KEYS:latest" \

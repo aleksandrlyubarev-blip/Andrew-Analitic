@@ -42,7 +42,8 @@ logger = logging.getLogger("bridge.auth")
 # probes (which can't carry a header). Demo routes are public on purpose so
 # RomeoFlexVision frontend integration doesn't need a key.
 PUBLIC_PATHS: frozenset[str] = frozenset({
-    "/health",
+    "/healthz",         # Cloud Run startup/liveness probe (cheap, no deps)
+    "/health",          # rich human-facing health check
     "/scene/ops",
     "/scene/ops/demo",
     "/docs",

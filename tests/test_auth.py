@@ -82,12 +82,19 @@ def test_no_keys_no_fail_closed_is_noop():
 
 
 def test_health_bypasses_auth_even_when_keys_set():
-    """Cloud Run startup probe must reach /health without a key."""
+    """Cloud Run startup probe must reach /healthz without a key. /health is
+    the rich human-facing variant; both are public."""
     app = _build_app(keys={"alex": "secret"})
+    # Add a /healthz route that mirrors the real cheap probe.
+    @app.get("/healthz")
+    async def _hz():
+        return {"status": "ok"}
+
     client = TestClient(app)
     r = client.get("/health")
     assert r.status_code == 200
-    assert r.json() == {"status": "ok"}
+    rz = client.get("/healthz")
+    assert rz.status_code == 200
 
 
 def test_missing_header_returns_401():
@@ -141,6 +148,9 @@ def test_fail_closed_with_no_keys_rejects_everything():
 
 def test_public_paths_constant_includes_health():
     assert "/health" in PUBLIC_PATHS
+    assert "/healthz" in PUBLIC_PATHS, (
+        "/healthz must bypass auth — it's the Cloud Run probe target"
+    )
 
 
 # ── middleware_kwargs_from_env ────────────────────────────────────────────────
