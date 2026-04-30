@@ -16,6 +16,7 @@ README maps that plan to the files in this directory.
 | `pause.sh` / `resume.sh` | Emergency stop & restart. Sets Cloud Run `max-instances=0` and Cloud SQL `activation-policy=NEVER`. | §4 cost-protection |
 | `smoketest.sh` | Day-13 smoke test: hits `/health`, the auth gate, and 20 `/analyze` queries balanced across analytics / education / hybrid lanes; reports pass/fail/lane-mismatch summary. | §3 Day 13 |
 | `migrations/001_init.sql` | Postgres schema: `pgvector` + `pg_trgm`, LangGraph checkpoint tables, `memory_chunks` (vector + tsvector + trigram indexes), `request_log`, sales fixture. | §3 Day 5, §3 Day 8 |
+| `monitoring/` | Cloud Logging log-based metrics + Cloud Monitoring alert policies for LLM cost spikes and error rate. Idempotent `setup.sh`. | §3 Day 11 |
 | `moltis-gce/` | Optional GCE VM startup script + README for running Moltis with `docker.sock`. **Skip unless E2B fallback is insufficient.** | §5.5 option (c) |
 | `BETA_RUNBOOK.md` | Operational playbook: rollback, key rotation, log tailing, DB surgery, teardown. | §3 Day 14 |
 

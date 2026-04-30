@@ -93,6 +93,19 @@ gcloud logging read 'resource.type=cloud_run_revision AND
   --limit=50
 ```
 
+### Alert response (cost spike / error rate)
+
+Two Cloud Monitoring alerts (set up via `deploy/monitoring/setup.sh`)
+catch trouble before the daily billing budget alert does:
+
+| Alert | Means | First check |
+|---|---|---|
+| **Andrew — LLM cost spike (>$0.50 / 5 min)** | Sum of `llm_call` `cost_usd` exceeded $0.50 in the last 5 min — ≈100× steady state | `gcloud logging read 'jsonPayload.event="llm_call"' --limit=50 --order=desc` to find the offending model / thread |
+| **Andrew — LLM error rate (>5 / 5 min)** | Sustained `llm_error` events — bad key / provider outage / wrong model id | `gcloud logging read 'jsonPayload.event="llm_error"' --limit=20 --order=desc --format='value(jsonPayload.model,jsonPayload.error)'` |
+
+If you can't find a single bad request and spend keeps climbing, kill it
+with `./deploy/pause.sh`. Resume after fix with `./deploy/resume.sh`.
+
 ---
 
 ## 3. Roll back a bad deploy

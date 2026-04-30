@@ -1,0 +1,62 @@
+{
+  "_README": [
+    "Cloud Monitoring alert policy: fires when LLM spend exceeds a runaway-loop threshold.",
+    "",
+    "Apply with (after creating a notification channel — see setup.sh):",
+    "  gcloud alpha monitoring policies create \\",
+    "      --policy-from-file=deploy/monitoring/llm-cost-alert.policy.json",
+    "",
+    "Threshold rationale (plan §2 cost model):",
+    "  - 5-10 testers × 10 LLM calls/day × ~$0.005/call ≈ $0.50/day total",
+    "  - Per-minute steady state: $0.0003",
+    "  - $0.50 in 5 minutes ⇒ ~100x normal, almost certainly a retry loop",
+    "  - Triggers ~10 minutes before the $50 budget alert would fire on day 1",
+    "",
+    "Substitute before applying (or wrap in setup.sh):",
+    "  - PROJECT_ID                      gcloud project id",
+    "  - NOTIFICATION_CHANNEL_RESOURCE   projects/PID/notificationChannels/CHID",
+    "",
+    "Strip this _README field before passing to gcloud — JSON parsers accept",
+    "extra fields but the policy schema validator may reject them."
+  ],
+
+  "displayName": "Andrew — LLM cost spike (>$0.50 / 5 min)",
+  "documentation": {
+    "content": "Sum of llm_call cost_usd exceeded $0.50 in a 5-minute window. Likely a retry loop or runaway agent. Triage:\n\n1. Tail recent llm_call logs, filtered to the worst model:\n   gcloud logging read 'resource.type=cloud_run_revision AND jsonPayload.event=\"llm_call\"' --limit=50 --order=desc\n\n2. If a single thread_id repeats, kill the instance:\n   gcloud run services update andrew-core --max-instances=0\n   (resume with deploy/resume.sh once root cause is fixed)\n\n3. Check provider dashboards for matching spend.",
+    "mimeType": "text/markdown"
+  },
+
+  "combiner": "OR",
+  "conditions": [
+    {
+      "displayName": "5-min llm_call cost sum > $0.50",
+      "conditionThreshold": {
+        "filter": "metric.type=\"logging.googleapis.com/user/andrew_llm_cost_usd\" AND resource.type=\"cloud_run_revision\"",
+        "aggregations": [
+          {
+            "alignmentPeriod": "300s",
+            "perSeriesAligner": "ALIGN_SUM",
+            "crossSeriesReducer": "REDUCE_SUM",
+            "groupByFields": []
+          }
+        ],
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 0.50,
+        "duration": "0s",
+        "trigger": {
+          "count": 1
+        }
+      }
+    }
+  ],
+
+  "alertStrategy": {
+    "autoClose": "1800s"
+  },
+
+  "notificationChannels": [
+    "NOTIFICATION_CHANNEL_RESOURCE"
+  ],
+
+  "enabled": true
+}

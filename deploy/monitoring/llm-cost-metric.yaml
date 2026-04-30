@@ -1,0 +1,50 @@
+# deploy/monitoring/llm-cost-metric.yaml
+#
+# Cloud Logging log-based DISTRIBUTION metric. Extracts `cost_usd` from each
+# `event=llm_call` log line written by bridge/llm_telemetry.py, so Cloud
+# Monitoring can alert on cost rate per minute / per hour / per model.
+#
+# Apply:
+#   gcloud logging metrics create andrew_llm_cost_usd \
+#       --config-from-file=deploy/monitoring/llm-cost-metric.yaml
+#
+# Update (any change to filter / extractor / labels):
+#   gcloud logging metrics update andrew_llm_cost_usd \
+#       --config-from-file=deploy/monitoring/llm-cost-metric.yaml
+#
+# Once landed, the metric is reachable in Cloud Monitoring as
+# `logging.googleapis.com/user/andrew_llm_cost_usd`.
+
+description: "USD cost per LiteLLM completion call (per bridge/llm_telemetry)"
+
+# Cloud Run JSON logs land in jsonPayload. We pin the service name so
+# accidental re-use of the bridge image in another service can't bleed into
+# the metric.
+filter: |
+  resource.type="cloud_run_revision"
+  AND resource.labels.service_name="andrew-core"
+  AND jsonPayload.event="llm_call"
+
+# DISTRIBUTION metric → Cloud Monitoring computes p50/p95/p99/sum/mean
+# server-side. Extracting cost_usd (a float) gives us spend distribution.
+valueExtractor: EXTRACT(jsonPayload.cost_usd)
+
+metricDescriptor:
+  metricKind: DELTA
+  valueType: DISTRIBUTION
+  unit: USD
+  displayName: "Andrew LLM cost (USD per call)"
+
+# Labels let dashboards / alerts slice by model. Adding more dimensions here
+# is cheap, but each new label multiplies metric cardinality — keep it tight.
+labelExtractors:
+  model: EXTRACT(jsonPayload.model)
+
+# 30-bucket exponential distribution from $0.0001 to ~$10 (1.5x growth).
+# Covers cheap embeddings ($0.0001) up to runaway 100k-token Claude calls
+# (~$1.50) with enough resolution to spot drift.
+bucketOptions:
+  exponentialBuckets:
+    numFiniteBuckets: 30
+    growthFactor: 1.5
+    scale: 0.0001

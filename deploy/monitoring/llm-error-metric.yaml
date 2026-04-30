@@ -1,0 +1,29 @@
+# deploy/monitoring/llm-error-metric.yaml
+#
+# Counter metric for failed LiteLLM calls (bridge.llm_telemetry _on_failure
+# logs `event=llm_error`). Lets you alert on sustained provider outage or
+# bad credentials before user complaints arrive.
+#
+# Apply:
+#   gcloud logging metrics create andrew_llm_error_count \
+#       --config-from-file=deploy/monitoring/llm-error-metric.yaml
+
+description: "Count of failed LiteLLM completion calls"
+
+filter: |
+  resource.type="cloud_run_revision"
+  AND resource.labels.service_name="andrew-core"
+  AND jsonPayload.event="llm_error"
+
+# No valueExtractor → defaults to a counter (1 per matching log line).
+
+metricDescriptor:
+  metricKind: DELTA
+  valueType: INT64
+  unit: "1"
+  displayName: "Andrew LLM errors (count)"
+
+# Slice by model so you know whether a single provider is down vs. a
+# global config issue.
+labelExtractors:
+  model: EXTRACT(jsonPayload.model)

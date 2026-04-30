@@ -1,0 +1,56 @@
+{
+  "_README": [
+    "Alert policy: fires when LLM error rate sustains above the noise floor.",
+    "Catches: bad API key, provider outage, malformed model id, rate-limit spiral.",
+    "",
+    "Threshold: >5 errors in any 5-minute window (≈1/min sustained). Bursty",
+    "single failures (transient 502s) are absorbed.",
+    "",
+    "Apply via deploy/monitoring/setup.sh, or directly:",
+    "  gcloud alpha monitoring policies create \\",
+    "      --policy-from-file=deploy/monitoring/llm-error-alert.policy.json",
+    "",
+    "Substitute NOTIFICATION_CHANNEL_RESOURCE before applying.",
+    "Strip this _README before passing to gcloud."
+  ],
+
+  "displayName": "Andrew — LLM error rate (>5 / 5 min)",
+  "documentation": {
+    "content": "More than 5 llm_error events in 5 minutes. Triage:\n\n1. Read recent errors:\n   gcloud logging read 'resource.type=cloud_run_revision AND jsonPayload.event=\"llm_error\"' --limit=20 --order=desc --format='value(jsonPayload.model,jsonPayload.error)'\n\n2. If one model dominates, check provider status (status.openai.com / status.anthropic.com / etc.) and consider rotating the BETA_API_KEYS user OR routing that lane to a fallback model in core/routing.py.\n\n3. If errors hit ALL models, check that secrets aren't expired:\n   gcloud secrets versions access latest --secret=OPENAI_API_KEY | head -c 8",
+    "mimeType": "text/markdown"
+  },
+
+  "combiner": "OR",
+  "conditions": [
+    {
+      "displayName": "5-min llm_error count > 5",
+      "conditionThreshold": {
+        "filter": "metric.type=\"logging.googleapis.com/user/andrew_llm_error_count\" AND resource.type=\"cloud_run_revision\"",
+        "aggregations": [
+          {
+            "alignmentPeriod": "300s",
+            "perSeriesAligner": "ALIGN_SUM",
+            "crossSeriesReducer": "REDUCE_SUM",
+            "groupByFields": []
+          }
+        ],
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 5.0,
+        "duration": "0s",
+        "trigger": {
+          "count": 1
+        }
+      }
+    }
+  ],
+
+  "alertStrategy": {
+    "autoClose": "1800s"
+  },
+
+  "notificationChannels": [
+    "NOTIFICATION_CHANNEL_RESOURCE"
+  ],
+
+  "enabled": true
+}
