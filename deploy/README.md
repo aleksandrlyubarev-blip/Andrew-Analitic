@@ -11,6 +11,7 @@ README maps that plan to the files in this directory.
 | `Dockerfile.cloudrun` | Cloud-Run-tuned image: listens on `$PORT`, single uvicorn worker, gen2 exec env. | §1 architecture, §3 Day 3 |
 | `cloudbuild.yaml` | Cloud Build config: build → push to Artifact Registry → deploy a `--no-traffic` revision tagged `rev-<sha>`. Promote with `update-traffic --to-latest`. | §3 Day 10 |
 | `bootstrap.sh` | Day 1-2: enable APIs, create `andrew-core-sa` / `moltis-bridge-sa` / `cloudbuild-deployer` with least-privilege roles. Idempotent. | §3 Day 1-2 |
+| `bootstrap-gha.sh` | One-time WIF setup for GitHub Actions deploys (alternative to Cloud Build trigger). Creates a workload-identity-pool + OIDC provider scoped to one repo. No long-lived JSON keys. | §3 Day 10 (alt) |
 | `provision.sh` | Day 4-5: Artifact Registry + Cloud SQL Postgres 16 (`db-f1-micro` Enterprise) + Secret Manager seeding + per-tester beta keys + apply schema migration. | §3 Day 4-5 |
 | `deploy.sh` | Day 6: `gcloud builds submit` + `gcloud run deploy`. Reads tag/min-instances/max-instances from env. | §3 Day 6, §9 |
 | `pause.sh` / `resume.sh` | Emergency stop & restart. Sets Cloud Run `max-instances=0` and Cloud SQL `activation-policy=NEVER`. | §4 cost-protection |
@@ -91,7 +92,11 @@ or because they're once-per-project Console steps:
 - Connecting the **Cloud Build GitHub trigger** to this repo — Console →
   Cloud Build → Triggers → "Connect repository". After that, every push to
   `claude/deploy-andrew-gcp-beta-f5UVU` (or whatever branch you pick) builds
-  and deploys via `cloudbuild.yaml`.
+  and deploys via `cloudbuild.yaml`. **Alternative:** if the trigger is
+  finicky or you prefer a code-reviewable pipeline, skip it and run
+  `./deploy/bootstrap-gha.sh` once. That sets up Workload Identity
+  Federation; the existing `.github/workflows/deploy.yml` then handles
+  builds + deploys on every push to main, with no JSON keys involved.
 - Setting the **Telegram webhook** — see plan §7.2. Only relevant if you
   ship Telegram access during the beta.
 - Distributing per-tester API keys to the team (printed by `provision.sh`).

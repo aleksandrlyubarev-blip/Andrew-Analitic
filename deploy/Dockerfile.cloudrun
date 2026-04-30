@@ -40,11 +40,15 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 
 # gunicorn + uvicorn worker: handles slow LangGraph nodes without blocking the loop.
 # --workers=1 because Cloud Run scales horizontally; --threads=8 is the in-process pool.
+# --worker-tmp-dir=/dev/shm: gunicorn's heartbeat file lives in /tmp by default,
+#   which on Cloud Run is a slow tmpfs. /dev/shm is RAM-backed and stops sporadic
+#   "WORKER TIMEOUT" kills under load — recommended Cloud Run pattern.
 CMD exec gunicorn bridge.api:app \
     -k uvicorn.workers.UvicornWorker \
     --bind "0.0.0.0:${PORT}" \
     --workers 1 \
     --threads 8 \
     --timeout 3600 \
+    --worker-tmp-dir /dev/shm \
     --access-logfile - \
     --error-logfile -

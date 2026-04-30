@@ -1,0 +1,139 @@
+name: Deploy to Cloud Run
+
+# Fallback to Cloud Build trigger (deploy/cloudbuild.yaml). Use this when:
+#   - The Cloud Build GitHub trigger is broken or unconnected
+#   - You want a code-reviewable deploy pipeline (vs. Console-configured trigger)
+#   - You need the same workflow to also run from PR previews / scheduled jobs
+#
+# Setup (one-time, see deploy/bootstrap-gha.sh):
+#   1. Run ./deploy/bootstrap-gha.sh — creates WIF pool, OIDC provider, IAM
+#   2. Set GitHub repo VARIABLES (Settings → Secrets and variables → Actions → Variables):
+#        GCP_PROJECT_ID                     andrew-beta-2026
+#        GCP_REGION                         us-central1
+#        GCP_WORKLOAD_IDENTITY_PROVIDER     projects/<PROJ_NUMBER>/locations/global/workloadIdentityPools/andrew-gha/providers/github
+#        GCP_SERVICE_ACCOUNT                cloudbuild-deployer@<PROJ_ID>.iam.gserviceaccount.com
+#        GCP_SQL_INSTANCE                   andrew-pg
+#        GCP_SERVICE                        andrew-core
+#   No long-lived JSON keys are needed — auth is via Workload Identity Federation.
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+    inputs:
+      promote:
+        description: "Send 100% traffic to the new revision (otherwise --no-traffic)"
+        type: boolean
+        default: false
+
+# Block concurrent deploys on the same branch — the second push waits for
+# the first to finish so we don't race on revision tags.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write       # required for Workload Identity Federation
+
+jobs:
+  deploy:
+    name: Build & deploy to Cloud Run
+    runs-on: ubuntu-latest
+    environment: production    # set up an Environment in repo settings if you
+                               # want manual approval gates
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to GCP via WIF
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+
+      - name: Compute image tag
+        id: tag
+        run: |
+          echo "image=${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/andrew/andrew-core:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+
+      - name: Build image via Cloud Build
+        run: |
+          gcloud builds submit \
+            --tag="${{ steps.tag.outputs.image }}" \
+            --project="${{ vars.GCP_PROJECT_ID }}" \
+            -f deploy/Dockerfile.cloudrun .
+
+      - name: Deploy --no-traffic revision to Cloud Run
+        id: deploy
+        run: |
+          gcloud run deploy "${{ vars.GCP_SERVICE }}" \
+            --image="${{ steps.tag.outputs.image }}" \
+            --region="${{ vars.GCP_REGION }}" \
+            --platform=managed \
+            --execution-environment=gen2 \
+            --service-account="${{ vars.GCP_SERVICE_ACCOUNT }}" \
+            --cpu=1 --memory=1Gi --cpu-boost \
+            --min-instances=0 --max-instances=3 \
+            --concurrency=4 --timeout=3600 \
+            --startup-probe=httpGet.path=/healthz,initialDelaySeconds=0,periodSeconds=5,timeoutSeconds=4,failureThreshold=10 \
+            --liveness-probe=httpGet.path=/healthz,periodSeconds=30,timeoutSeconds=4,failureThreshold=3 \
+            --add-cloudsql-instances="${{ vars.GCP_PROJECT_ID }}:${{ vars.GCP_REGION }}:${{ vars.GCP_SQL_INSTANCE }}" \
+            --set-env-vars="DB_USER=andrew,DB_NAME=andrew,DB_HOST=/cloudsql/${{ vars.GCP_PROJECT_ID }}:${{ vars.GCP_REGION }}:${{ vars.GCP_SQL_INSTANCE }},LITELLM_LOG=INFO,DATABASE_URL=postgresql+psycopg://andrew@/andrew?host=/cloudsql/${{ vars.GCP_PROJECT_ID }}:${{ vars.GCP_REGION }}:${{ vars.GCP_SQL_INSTANCE }}" \
+            --set-secrets="OPENAI_API_KEY=OPENAI_API_KEY:latest,ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest,XAI_API_KEY=XAI_API_KEY:latest,E2B_API_KEY=E2B_API_KEY:latest,DB_PASSWORD=DB_PASSWORD:latest,MOLTIS_PASSWORD=MOLTIS_PASSWORD:latest,BETA_API_KEYS=BETA_API_KEYS:latest" \
+            --allow-unauthenticated \
+            --tag="rev-${{ steps.tag.outputs.short_sha }}" \
+            --no-traffic
+          # Capture the per-revision URL for the smoke test.
+          REV_URL=$(gcloud run services describe "${{ vars.GCP_SERVICE }}" \
+            --region="${{ vars.GCP_REGION }}" \
+            --format='value(status.traffic[?tag=`rev-${{ steps.tag.outputs.short_sha }}`].url)' \
+            | head -n1)
+          echo "url=${REV_URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test new revision via /healthz
+        if: steps.deploy.outputs.url != ''
+        run: |
+          set -e
+          for i in 1 2 3 4 5; do
+            if curl -fsS --max-time 10 "${{ steps.deploy.outputs.url }}/healthz" >/dev/null; then
+              echo "Healthz OK on attempt $i"
+              exit 0
+            fi
+            echo "Healthz attempt $i failed; retrying in 6s..."
+            sleep 6
+          done
+          echo "::error::New revision failed /healthz 5 times — refusing to promote"
+          exit 1
+
+      - name: Promote revision to 100% traffic
+        if: github.event.inputs.promote == 'true'
+        run: |
+          gcloud run services update-traffic "${{ vars.GCP_SERVICE }}" \
+            --region="${{ vars.GCP_REGION }}" \
+            --to-tags="rev-${{ steps.tag.outputs.short_sha }}=100"
+
+      - name: Summary
+        run: |
+          {
+            echo "## Deployed revision: \`rev-${{ steps.tag.outputs.short_sha }}\`"
+            echo
+            echo "- Image: \`${{ steps.tag.outputs.image }}\`"
+            echo "- Per-revision URL: ${{ steps.deploy.outputs.url }}"
+            echo "- Promoted to 100%: ${{ github.event.inputs.promote == 'true' }}"
+            echo
+            if [[ "${{ github.event.inputs.promote }}" != "true" ]]; then
+              echo "To promote later:"
+              echo '```'
+              echo "gcloud run services update-traffic ${{ vars.GCP_SERVICE }} \\"
+              echo "  --region=${{ vars.GCP_REGION }} \\"
+              echo "  --to-tags=rev-${{ steps.tag.outputs.short_sha }}=100"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
