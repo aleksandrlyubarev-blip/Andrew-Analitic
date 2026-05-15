@@ -1,0 +1,53 @@
+# Claude Code PR review (committed disabled — see ТЗ Phase 0.3).
+#
+# This workflow is intentionally limited to `workflow_dispatch` so it does NOT
+# run on every PR until Phase 2.1 of the SDK-credit migration. To enable
+# automatic PR reviews, replace the `on:` block with:
+#
+#   on:
+#     pull_request:
+#       types: [opened, synchronize, reopened]
+#     issue_comment:
+#       types: [created]
+#
+# and ensure the runner has access to plan-auth credentials (Phase 1.2 must be
+# done first, otherwise this will eat Anthropic Console pay-as-you-go spend).
+
+name: Claude PR Review
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to review (manual run)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  claude-review:
+    name: Claude review
+    runs-on: ubuntu-latest
+    # Belt-and-suspenders: even manual runs are gated behind this flag until
+    # Phase 2.1 explicitly enables the workflow.
+    if: ${{ vars.CLAUDE_REVIEW_ENABLED == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Claude Code review
+        uses: anthropics/claude-code-action@beta
+        with:
+          # Plan auth via cached `claude login` credentials is configured at the
+          # runner level (self-hosted runner with mounted ~/.claude). If using
+          # GitHub-hosted runners, fall back to OAUTH_TOKEN until Anthropic
+          # publishes guidance for plan-auth in CI (expected ~08.06.2026).
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          direct_prompt: |
+            Review this PR for correctness, style, and any obvious regressions
+            in the Andrew Swarm test surface. Be terse.
